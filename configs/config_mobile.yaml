@@ -1,0 +1,37 @@
+environment:
+  sim_timestep: 0.01
+  max_episode_steps: 500       # longer episodes for navigation + manipulation
+  num_objects: 4                # more objects across shelves
+  workspace_size: 5.0           # larger warehouse (5m x 5m)
+  camera_width: 224
+  camera_height: 224
+  num_shelves: 2                # two shelf locations
+  shelf_positions:              # where shelves are in the warehouse
+    - [2.0, 0.0]
+    - [-2.0, 0.0]
+  dropoff_position: [0.0, 2.0]  # where objects get delivered
+
+model:
+  vision_backbone: resnet18
+  language_model: distilbert-base-uncased
+  vision_features: 512
+  language_features: 768
+  fusion_dim: 256
+  action_dim: 10                # 3 base (vx, vy, wz) + 6 arm + 1 gripper
+
+training:
+  batch_size: 32
+  learning_rate: 0.00005
+  bc_epochs: 30
+  rl_episodes: 150
+  gamma: 0.99
+  checkpoint_interval: 10
+
+data:
+  num_demonstrations: 300
+  train_split: 0.8
+  data_dir: data/demos_mobile
+
+logging:
+  log_dir: logs/mobile
+  tensorboard: true
