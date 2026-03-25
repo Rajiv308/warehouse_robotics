@@ -25,8 +25,6 @@ class ImprovedExpert:
         self.object_id        = object_ids[target_object_idx]
         obj_pos, _            = p.getBasePositionAndOrientation(object_ids[target_object_idx])
         self.target_pos       = np.array(obj_pos)
-
-        # Use environment's current randomized dropoff if available
         if env is not None and hasattr(env, 'current_dropoff'):
             self.dropoff_pos = np.array(env.current_dropoff + [0.15])
         else:
