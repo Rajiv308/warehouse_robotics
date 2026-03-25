@@ -1,6 +1,6 @@
 environment:
   sim_timestep: 0.01
-  max_episode_steps: 400
+  max_episode_steps: 700
   num_objects: 4
   workspace_size: 5.0
   camera_width: 224
