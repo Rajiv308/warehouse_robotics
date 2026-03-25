@@ -153,24 +153,46 @@ class ImprovedExpert:
                 self.phase_steps = 0
 
         elif self.phase == 6:
-            # Navigate to dropoff
-            vx, vy, wz, reached = self.navigate_to(
-                [dropoff[0], dropoff[1]], speed=0.6
-            )
-            joints = self.compute_ik([tx, ty, tz + 0.45])
-            action[0], action[1], action[2] = vx*0.5, vy, wz*0.5
-            action[3:9] = joints[:6]
+            # Navigate directly to dropoff with full speed
+            import pybullet as p6
+            husky_pos, husky_orn = p6.getBasePositionAndOrientation(self.husky_id)
+            heading = p6.getEulerFromQuaternion(husky_orn)[2]
+            diff = np.array([dropoff[0] - husky_pos[0], dropoff[1] - husky_pos[1]])
+            dist_to_drop = np.linalg.norm(diff)
+            desired = np.arctan2(diff[1], diff[0])
+            err = desired - heading
+            while err >  np.pi: err -= 2*np.pi
+            while err < -np.pi: err += 2*np.pi
+            action[0] = 1.0
+            action[1] = 0.0
+            action[2] = float(np.clip(err * 2.0, -1.0, 1.0))
+            action[3:9] = np.array([0, -0.785, 0, -2.356, 0, 1.571])
             action[9]   = 0.0
-            if reached or self.phase_steps >= 40:
+            if dist_to_drop < 0.5:
                 self.phase = 7
                 self.phase_steps = 0
 
         elif self.phase == 7:
-            # Place at dropoff
-            action[0:3] = 0.0
-            joints = self.compute_ik([dropoff[0], dropoff[1], dropoff[2]+0.1])
-            action[3:9] = joints[:6]
-            action[9]   = 1.0
+            # Fine approach then place
+            import pybullet as p7
+            husky_pos, husky_orn = p7.getBasePositionAndOrientation(self.husky_id)
+            heading = p7.getEulerFromQuaternion(husky_orn)[2]
+            diff = np.array([dropoff[0] - husky_pos[0], dropoff[1] - husky_pos[1]])
+            dist_to_drop = np.linalg.norm(diff)
+            if dist_to_drop > 0.3:
+                desired = np.arctan2(diff[1], diff[0])
+                err = desired - heading
+                while err >  np.pi: err -= 2*np.pi
+                while err < -np.pi: err += 2*np.pi
+                action[0] = 0.5
+                action[2] = float(np.clip(err * 2.0, -1.0, 1.0))
+                action[3:9] = np.array([0, -0.785, 0, -2.356, 0, 1.571])
+                action[9]   = 0.0
+            else:
+                action[0:3] = 0.0
+                joints = self.compute_ik([dropoff[0], dropoff[1], dropoff[2]+0.1])
+                action[3:9] = joints[:6]
+                action[9]   = 1.0
 
         self.phase_steps += 1
         return action
