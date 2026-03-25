@@ -23,15 +23,8 @@ class ImprovedExpert:
         self.phase_steps      = 0
         self.grasp_constraint = None
         self.object_id        = object_ids[target_object_idx]
-        self.all_object_ids   = object_ids
         obj_pos, _            = p.getBasePositionAndOrientation(object_ids[target_object_idx])
         self.target_pos       = np.array(obj_pos)
-
-        # Store initial positions of ALL objects to freeze during navigation
-        self.initial_obj_positions = []
-        for oid in object_ids:
-            pos, orn = p.getBasePositionAndOrientation(oid)
-            self.initial_obj_positions.append((list(pos), list(orn)))
 
         # Use environment's current randomized dropoff if available
         if env is not None and hasattr(env, 'current_dropoff'):
@@ -90,18 +83,10 @@ class ImprovedExpert:
         tx, ty, tz = self.target_pos
         dropoff    = self.dropoff_pos
 
-        # Lock Husky during arm phases
+        # Lock Husky during arm phases to prevent physics drift
         if self.phase in [2, 3, 4, 5]:
             import pybullet as p_lock
             p_lock.resetBaseVelocity(self.husky_id, [0,0,0], [0,0,0])
-
-        # Freeze ALL objects during navigation to prevent falling
-        if self.phase in [0, 1] and hasattr(self, 'initial_obj_positions'):
-            import pybullet as p_frz
-            for i, oid in enumerate(self.all_object_ids):
-                pos, orn = self.initial_obj_positions[i]
-                p_frz.resetBasePositionAndOrientation(oid, pos, orn)
-                p_frz.resetBaseVelocity(oid, [0,0,0], [0,0,0])
 
         if self.phase == 0:
             # Navigate directly toward object position
@@ -190,7 +175,7 @@ class ImprovedExpert:
                 self.phase_steps = 0
 
         elif self.phase == 6:
-            # Navigate to dropoff carrying object
+            # Navigate to dropoff, manually carrying object with robot
             import pybullet as p6
             husky_pos, husky_orn = p6.getBasePositionAndOrientation(self.husky_id)
             heading = p6.getEulerFromQuaternion(husky_orn)[2]
@@ -200,41 +185,70 @@ class ImprovedExpert:
             err = desired - heading
             while err >  np.pi: err -= 2*np.pi
             while err < -np.pi: err += 2*np.pi
-
-            # Proportional speed - slow down near target to avoid overshooting
-            speed = np.clip(dist_to_drop * 0.4, 0.15, 1.0)
-            action[0] = float(speed)
+            action[0] = 1.0
             action[1] = 0.0
-            action[2] = float(np.clip(err * 1.5, -1.0, 1.0))
+            action[2] = float(np.clip(err * 2.0, -1.0, 1.0))
             action[3:9] = np.array([0, -0.785, 0, -2.356, 0, 1.571])
             action[9]   = 0.0
 
-            # Move object with gripper
+            # Manually move object with gripper during navigation
             gripper_state = p6.getLinkState(self.panda_id, 11)
             gripper_pos   = np.array(gripper_state[0])
+            carry_pos     = [gripper_pos[0], gripper_pos[1], gripper_pos[2] - 0.04]
             p6.resetBasePositionAndOrientation(
-                self.object_id,
-                [gripper_pos[0], gripper_pos[1], gripper_pos[2] - 0.04],
-                [0,0,0,1]
+                self.object_id, carry_pos, [0,0,0,1]
             )
-
-            # Final approach: smoothly interpolate to dropoff when close
-            if dist_to_drop < 1.0:
-                step_size = min(0.08, dist_to_drop)
-                direction = diff / (dist_to_drop + 1e-8)
-                new_x = husky_pos[0] + direction[0] * step_size
-                new_y = husky_pos[1] + direction[1] * step_size
-                new_orn = p6.getQuaternionFromEuler([0, 0, desired])
-                p6.resetBasePositionAndOrientation(
-                    self.husky_id, [new_x, new_y, 0.15], new_orn
-                )
-                p6.resetBasePositionAndOrientation(
-                    self.panda_id, [new_x, new_y, 0.65], new_orn
-                )
 
             if dist_to_drop < 0.5:
                 self.phase = 7
                 self.phase_steps = 0
+
+        elif self.phase == 7:
+            # Place object at dropoff
+            import pybullet as p7
+            husky_pos, husky_orn = p7.getBasePositionAndOrientation(self.husky_id)
+            diff = np.array([dropoff[0] - husky_pos[0], dropoff[1] - husky_pos[1]])
+            dist_to_drop = np.linalg.norm(diff)
+
+            # Keep carrying object with gripper
+            gripper_state = p7.getLinkState(self.panda_id, 11)
+            gripper_pos   = np.array(gripper_state[0])
+            carry_pos     = [gripper_pos[0], gripper_pos[1], gripper_pos[2] - 0.04]
+            p7.resetBasePositionAndOrientation(
+                self.object_id, carry_pos, [0,0,0,1]
+            )
+
+            if dist_to_drop > 0.3:
+                # Still navigating - keep driving
+                heading = p7.getEulerFromQuaternion(husky_orn)[2]
+                desired = np.arctan2(diff[1], diff[0])
+                err = desired - heading
+                while err >  np.pi: err -= 2*np.pi
+                while err < -np.pi: err += 2*np.pi
+                action[0] = 0.5
+                action[2] = float(np.clip(err * 2.0, -1.0, 1.0))
+                action[3:9] = np.array([0, -0.785, 0, -2.356, 0, 1.571])
+                action[9]   = 0.0
+            else:
+                # At dropoff - lower arm and release object
+                action[0:3] = 0.0
+                joints = self.compute_ik([dropoff[0], dropoff[1], 0.3])
+                action[3:9] = joints[:6]
+                action[9]   = 1.0
+                # Place object on floor at dropoff
+                p7.resetBasePositionAndOrientation(
+                    self.object_id,
+                    [dropoff[0], dropoff[1], 0.05],
+                    [0,0,0,1]
+                )
+                # Release constraint
+                if hasattr(self, "grasp_constraint") and self.grasp_constraint is not None:
+                    try:
+                        p7.removeConstraint(self.grasp_constraint)
+                    except:
+                        pass
+                    self.grasp_constraint = None
+
         self.phase_steps += 1
         return action
 
