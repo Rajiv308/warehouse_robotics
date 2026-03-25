@@ -27,7 +27,7 @@ def collect_cloud_demonstrations(num_demos=1000, save_dir="data/demos_mobile"):
     cfg['environment']['max_episode_steps'] = 600
 
     env    = MobileWarehouseEnvV2(
-        config_path="configs/config_cloud.yaml",
+        config_path="configs/config_mobile.yaml",
         render=False,
         curriculum_stage=0
     )

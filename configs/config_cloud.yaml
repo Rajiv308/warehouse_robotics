@@ -20,7 +20,7 @@ model:
   action_dim: 10
 
 training:
-  batch_size: 64            # bigger batch on GPU
+  batch_size: 128            # bigger batch on GPU
   learning_rate: 0.00003    # slightly lower for stability
   bc_epochs: 50             # more epochs
   rl_episodes: 2000         # 10x more than local
