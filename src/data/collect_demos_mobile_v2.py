@@ -170,7 +170,7 @@ class ImprovedExpert:
                 self.phase_steps = 0
 
         elif self.phase == 6:
-            # Navigate directly to dropoff with full speed
+            # Navigate to dropoff, manually carrying object with robot
             import pybullet as p6
             husky_pos, husky_orn = p6.getBasePositionAndOrientation(self.husky_id)
             heading = p6.getEulerFromQuaternion(husky_orn)[2]
@@ -185,6 +185,15 @@ class ImprovedExpert:
             action[2] = float(np.clip(err * 2.0, -1.0, 1.0))
             action[3:9] = np.array([0, -0.785, 0, -2.356, 0, 1.571])
             action[9]   = 0.0
+
+            # Manually move object with gripper during navigation
+            gripper_state = p6.getLinkState(self.panda_id, 11)
+            gripper_pos   = np.array(gripper_state[0])
+            carry_pos     = [gripper_pos[0], gripper_pos[1], gripper_pos[2] - 0.04]
+            p6.resetBasePositionAndOrientation(
+                self.object_id, carry_pos, [0,0,0,1]
+            )
+
             if dist_to_drop < 0.5:
                 self.phase = 7
                 self.phase_steps = 0
