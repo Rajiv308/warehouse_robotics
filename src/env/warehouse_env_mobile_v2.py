@@ -180,6 +180,13 @@ class MobileWarehouseEnvV2:
         target_shelf = np.array(shelf_positions[shelf_idx])
         dist_to_shelf = np.linalg.norm(husky_xy - target_shelf)
 
+        # Also check distance to actual object position on shelf
+        obj_pos_check, _ = p.getBasePositionAndOrientation(
+            self.object_ids[self.target_object_idx]
+        )
+        dist_to_shelf = min(dist_to_shelf,
+            np.linalg.norm(husky_xy - np.array(obj_pos_check[:2])))
+
         gripper_state = p.getLinkState(self.panda_id, 11)
         gripper_pos   = np.array(gripper_state[0])
         obj_pos, _    = p.getBasePositionAndOrientation(
@@ -198,7 +205,7 @@ class MobileWarehouseEnvV2:
         reward = -0.3 * dist_to_shelf - 0.4 * dist_to_obj - 0.3 * dist_dropoff
 
         # Phase bonuses — one time only
-        if not self.reached_shelf and dist_to_shelf < 1.5:
+        if not self.reached_shelf and dist_to_shelf < 2.0:
             self.reached_shelf = True
             reward += 1.0
             self.phase_bonuses += 1.0
