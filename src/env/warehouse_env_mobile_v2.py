@@ -292,10 +292,10 @@ class MobileWarehouseEnvV2:
         half = len(self.wheel_joints) // 2
         for j in self.wheel_joints[:half]:
             p.setJointMotorControl2(self.husky_id, j,
-                p.VELOCITY_CONTROL, targetVelocity=left_vel, force=100)
+                p.VELOCITY_CONTROL, targetVelocity=left_vel, force=500)
         for j in self.wheel_joints[half:]:
             p.setJointMotorControl2(self.husky_id, j,
-                p.VELOCITY_CONTROL, targetVelocity=right_vel, force=100)
+                p.VELOCITY_CONTROL, targetVelocity=right_vel, force=500)
 
         # Arm
         p.setJointMotorControlArray(
