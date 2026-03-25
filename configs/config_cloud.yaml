@@ -1,6 +1,6 @@
 environment:
   sim_timestep: 0.01
-  max_episode_steps: 600
+  max_episode_steps: 400
   num_objects: 4
   workspace_size: 5.0
   camera_width: 224
@@ -23,7 +23,7 @@ training:
   batch_size: 128            # bigger batch on GPU
   learning_rate: 0.00003    # slightly lower for stability
   bc_epochs: 50             # more epochs
-  rl_episodes: 2000         # 10x more than local
+  rl_episodes: 1500         # 10x more than local
   gamma: 0.99
   checkpoint_interval: 5    # save more frequently
 

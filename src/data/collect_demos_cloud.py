@@ -49,15 +49,25 @@ def collect_cloud_demonstrations(num_demos=1000, save_dir="data/demos_mobile"):
             'observations':   [],
             'actions':        [],
             'rewards':        [],
+            'states':         [],
             'instruction':    instruction,
             'phases_reached': set()
         }
 
         for step in range(max_steps):
             action = expert.get_action(env.object_ids)
-            # Store full resolution image
-            demo_data['observations'].append(obs.copy())
+            # Downsample to save disk
+            import cv2
+            small_obs = cv2.resize(obs, (84, 84))
+            import pybullet as p_s
+            base_pos, base_orn = p_s.getBasePositionAndOrientation(env.husky_id)
+            yaw = p_s.getEulerFromQuaternion(base_orn)[2]
+            arm_j = [p_s.getJointState(env.panda_id, j)[0] for j in range(6)]
+            import numpy as np_s
+            robot_state = np_s.array([base_pos[0], base_pos[1], yaw] + arm_j, dtype=np_s.float32)
+            demo_data['observations'].append(small_obs)
             demo_data['actions'].append(action.copy())
+            demo_data['states'].append(robot_state)
             obs, reward, done, info = env.step(action)
             demo_data['rewards'].append(reward)
 
@@ -107,7 +117,8 @@ def collect_cloud_demonstrations(num_demos=1000, save_dir="data/demos_mobile"):
                 all_samples.append({
                     'image':       demo['observations'][i],
                     'action':      demo['actions'][i],
-                    'instruction': demo['instruction']
+                    'instruction': demo['instruction'],
+                    'state':       demo['states'][i] if 'states' in demo else None
                 })
 
         np.random.shuffle(all_samples)
