@@ -287,17 +287,31 @@ class MobileWarehouseEnvV2:
 
     def step(self, action):
         # Navigation
-        vx = float(action[0]) * 2.0
-        wz = float(action[2]) * 1.0
-        left_vel  = vx - wz * 0.3
-        right_vel = vx + wz * 0.3
-        half = len(self.wheel_joints) // 2
-        for j in self.wheel_joints[:half]:
-            p.setJointMotorControl2(self.husky_id, j,
-                p.VELOCITY_CONTROL, targetVelocity=left_vel, force=500)
-        for j in self.wheel_joints[half:]:
-            p.setJointMotorControl2(self.husky_id, j,
-                p.VELOCITY_CONTROL, targetVelocity=right_vel, force=500)
+        # Move Husky directly via position update (avoids constraint instability)
+        vx = float(action[0]) * 0.05   # meters per step
+        wz = float(action[2]) * 0.05   # radians per step
+
+        husky_pos, husky_orn = p.getBasePositionAndOrientation(self.husky_id)
+        current_yaw = p.getEulerFromQuaternion(husky_orn)[2]
+
+        # Update heading
+        new_yaw = current_yaw + wz
+        new_orn = p.getQuaternionFromEuler([0, 0, new_yaw])
+
+        # Move in current heading direction
+        new_x = husky_pos[0] + vx * np.cos(new_yaw)
+        new_y = husky_pos[1] + vx * np.sin(new_yaw)
+        new_pos = [new_x, new_y, husky_pos[2]]
+
+        p.resetBasePositionAndOrientation(self.husky_id, new_pos, new_orn)
+
+        # Move Panda with Husky
+        panda_pos, panda_orn = p.getBasePositionAndOrientation(self.panda_id)
+        p.resetBasePositionAndOrientation(
+            self.panda_id,
+            [new_x, new_y, new_pos[2] + 0.5],
+            new_orn
+        )
 
         # Arm
         p.setJointMotorControlArray(
