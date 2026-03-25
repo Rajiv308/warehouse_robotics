@@ -76,6 +76,11 @@ class ImprovedExpert:
         tx, ty, tz = self.target_pos
         dropoff    = self.dropoff_pos
 
+        # Lock Husky during arm phases to prevent physics drift
+        if self.phase in [2, 3, 4, 5]:
+            import pybullet as p_lock
+            p_lock.resetBaseVelocity(self.husky_id, [0,0,0], [0,0,0])
+
         if self.phase == 0:
             # Navigate directly toward object position
             approach = self.get_approach_position()
@@ -119,12 +124,21 @@ class ImprovedExpert:
                 self.phase_steps = 0
 
         elif self.phase == 4:
-            # Close gripper
+            # Close gripper hard
             action[0:3] = 0.0
             joints = self.compute_ik([tx, ty, tz + 0.06])
             action[3:9] = joints[:6]
             action[9]   = 0.0
-            if self.phase_steps >= 40:
+            # Apply extra gripper force directly
+            import pybullet as p_grip
+            for gj in [9, 10]:
+                p_grip.setJointMotorControl2(
+                    self.panda_id, gj,
+                    p_grip.POSITION_CONTROL,
+                    targetPosition=0.0,
+                    force=50  # much stronger grip force
+                )
+            if self.phase_steps >= 50:
                 self.phase = 5
                 self.phase_steps = 0
 
