@@ -199,13 +199,23 @@ class ImprovedExpert:
                 self.phase_steps = 0
 
         elif self.phase == 7:
-            # Fine approach then place
+            # Place object at dropoff
             import pybullet as p7
             husky_pos, husky_orn = p7.getBasePositionAndOrientation(self.husky_id)
-            heading = p7.getEulerFromQuaternion(husky_orn)[2]
             diff = np.array([dropoff[0] - husky_pos[0], dropoff[1] - husky_pos[1]])
             dist_to_drop = np.linalg.norm(diff)
+
+            # Keep carrying object with gripper
+            gripper_state = p7.getLinkState(self.panda_id, 11)
+            gripper_pos   = np.array(gripper_state[0])
+            carry_pos     = [gripper_pos[0], gripper_pos[1], gripper_pos[2] - 0.04]
+            p7.resetBasePositionAndOrientation(
+                self.object_id, carry_pos, [0,0,0,1]
+            )
+
             if dist_to_drop > 0.3:
+                # Still navigating - keep driving
+                heading = p7.getEulerFromQuaternion(husky_orn)[2]
                 desired = np.arctan2(diff[1], diff[0])
                 err = desired - heading
                 while err >  np.pi: err -= 2*np.pi
@@ -215,10 +225,24 @@ class ImprovedExpert:
                 action[3:9] = np.array([0, -0.785, 0, -2.356, 0, 1.571])
                 action[9]   = 0.0
             else:
+                # At dropoff - lower arm and release object
                 action[0:3] = 0.0
-                joints = self.compute_ik([dropoff[0], dropoff[1], dropoff[2]+0.1])
+                joints = self.compute_ik([dropoff[0], dropoff[1], 0.3])
                 action[3:9] = joints[:6]
                 action[9]   = 1.0
+                # Place object on floor at dropoff
+                p7.resetBasePositionAndOrientation(
+                    self.object_id,
+                    [dropoff[0], dropoff[1], 0.05],
+                    [0,0,0,1]
+                )
+                # Release constraint
+                if hasattr(self, "grasp_constraint") and self.grasp_constraint is not None:
+                    try:
+                        p7.removeConstraint(self.grasp_constraint)
+                    except:
+                        pass
+                    self.grasp_constraint = None
 
         self.phase_steps += 1
         return action
