@@ -82,6 +82,12 @@ def collect_cloud_demonstrations(num_demos=1000, save_dir="data/demos_mobile"):
         phases = demo_data['phases_reached']
         if 'shelf' in phases:
             demo_data['phases_reached'] = list(phases)
+            demo_data['quality'] = (
+                3 if 'deliver' in phases else
+                2 if 'grasp'   in phases else
+                1 if 'object'  in phases else
+                0
+            )
             demonstrations.append(demo_data)
             successful += 1
 
@@ -113,13 +119,21 @@ def collect_cloud_demonstrations(num_demos=1000, save_dir="data/demos_mobile"):
         # Subsample every 3rd step (less aggressive than local)
         all_samples = []
         for demo in demonstrations:
-            for i in range(0, len(demo['actions']), 3):
-                all_samples.append({
-                    'image':       demo['observations'][i],
-                    'action':      demo['actions'][i],
-                    'instruction': demo['instruction'],
-                    'state':       demo['states'][i] if 'states' in demo else None
-                })
+            quality = demo.get('quality', 0)
+            repeat = {3: 6, 2: 4, 1: 2, 0: 1}.get(quality, 1)
+            for _ in range(repeat):
+                for i in range(0, len(demo['actions']), 3):
+                    all_samples.append({
+                        'image':       demo['observations'][i],
+                        'action':      demo['actions'][i],
+                        'instruction': demo['instruction'],
+                        'state':       demo['states'][i] if 'states' in demo else None
+                    })
+        quality_counts = {}
+        for d in demonstrations:
+            q = d.get('quality', 0)
+            quality_counts[q] = quality_counts.get(q, 0) + 1
+        print(f"Quality distribution: {quality_counts}")
 
         np.random.shuffle(all_samples)
         split = int(0.8 * len(all_samples))
