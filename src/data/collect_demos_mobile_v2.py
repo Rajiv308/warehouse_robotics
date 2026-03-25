@@ -19,11 +19,13 @@ class ImprovedExpert:
         self.gripper_link = 11
 
     def reset(self, target_object_idx, object_ids):
-        self.phase        = 0
-        self.phase_steps  = 0
-        obj_pos, _        = p.getBasePositionAndOrientation(object_ids[target_object_idx])
-        self.target_pos   = np.array(obj_pos)
-        self.dropoff_pos  = np.array(self.cfg['environment']['dropoff_position'] + [0.15])
+        self.phase            = 0
+        self.phase_steps      = 0
+        self.grasp_constraint = None
+        self.object_id        = object_ids[target_object_idx]
+        obj_pos, _            = p.getBasePositionAndOrientation(object_ids[target_object_idx])
+        self.target_pos       = np.array(obj_pos)
+        self.dropoff_pos      = np.array(self.cfg['environment']['dropoff_position'] + [0.15])
 
         # Approach from origin (0,0) toward object
         # This is always a safe direction since origin is center of warehouse
@@ -124,21 +126,36 @@ class ImprovedExpert:
                 self.phase_steps = 0
 
         elif self.phase == 4:
-            # Close gripper hard
+            # Close gripper and create grasp constraint
             action[0:3] = 0.0
             joints = self.compute_ik([tx, ty, tz + 0.06])
             action[3:9] = joints[:6]
             action[9]   = 0.0
-            # Apply extra gripper force directly
+
             import pybullet as p_grip
-            for gj in [9, 10]:
-                p_grip.setJointMotorControl2(
-                    self.panda_id, gj,
-                    p_grip.POSITION_CONTROL,
-                    targetPosition=0.0,
-                    force=50  # much stronger grip force
+            # Create physical constraint to attach object to gripper
+            if not hasattr(self, 'grasp_constraint') or self.grasp_constraint is None:
+                gripper_state = p_grip.getLinkState(self.panda_id, 11)
+                gripper_pos = gripper_state[0]
+                obj_pos_cur, _ = p_grip.getBasePositionAndOrientation(
+                    self.object_id
                 )
-            if self.phase_steps >= 50:
+                dist = np.linalg.norm(
+                    np.array(gripper_pos) - np.array(obj_pos_cur)
+                )
+                if dist < 0.12:
+                    self.grasp_constraint = p_grip.createConstraint(
+                        self.panda_id, 11,
+                        self.object_id, -1,
+                        p_grip.JOINT_FIXED,
+                        [0, 0, 0],
+                        [0, 0, 0.05],
+                        [0, 0, 0]
+                    )
+                    p_grip.changeConstraint(self.grasp_constraint, maxForce=500)
+                    print(f"Grasp constraint created at step!")
+
+            if self.phase_steps >= 30:
                 self.phase = 5
                 self.phase_steps = 0
 
