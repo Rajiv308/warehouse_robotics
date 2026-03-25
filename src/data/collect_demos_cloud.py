@@ -76,6 +76,10 @@ def collect_cloud_demonstrations(num_demos=1000, save_dir="data/demos_mobile"):
             if info['grasped']:        demo_data['phases_reached'].add('grasp')
             if info['delivered']:      demo_data['phases_reached'].add('deliver')
 
+            # Early exit on delivery - no need to continue
+            if 'deliver' in demo_data['phases_reached']:
+                break
+
             if done:
                 break
 
