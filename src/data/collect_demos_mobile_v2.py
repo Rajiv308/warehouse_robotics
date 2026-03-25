@@ -18,14 +18,19 @@ class ImprovedExpert:
         self.phase_steps  = 0
         self.gripper_link = 11
 
-    def reset(self, target_object_idx, object_ids):
+    def reset(self, target_object_idx, object_ids, env=None):
         self.phase            = 0
         self.phase_steps      = 0
         self.grasp_constraint = None
         self.object_id        = object_ids[target_object_idx]
         obj_pos, _            = p.getBasePositionAndOrientation(object_ids[target_object_idx])
         self.target_pos       = np.array(obj_pos)
-        self.dropoff_pos      = np.array(self.cfg['environment']['dropoff_position'] + [0.15])
+
+        # Use environment's current randomized dropoff if available
+        if env is not None and hasattr(env, 'current_dropoff'):
+            self.dropoff_pos = np.array(env.current_dropoff + [0.15])
+        else:
+            self.dropoff_pos = np.array(self.cfg['environment']['dropoff_position'] + [0.15])
 
         # Approach from origin (0,0) toward object
         # This is always a safe direction since origin is center of warehouse

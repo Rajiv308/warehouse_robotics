@@ -43,7 +43,7 @@ def collect_cloud_demonstrations(num_demos=1000, save_dir="data/demos_mobile"):
 
     for demo_idx in tqdm(range(num_demos)):
         obs, instruction = env.reset()
-        expert.reset(env.target_object_idx, env.object_ids)
+        expert.reset(env.target_object_idx, env.object_ids, env=env)
 
         demo_data = {
             'observations':   [],

@@ -173,7 +173,9 @@ class MobileWarehouseEnvV2:
         husky_pos, _ = p.getBasePositionAndOrientation(self.husky_id)
         husky_xy     = np.array(husky_pos[:2])
 
-        shelf_positions = self.env_cfg['shelf_positions']
+        # Use current randomized shelf positions
+        shelf_positions = getattr(self, 'current_shelf_positions',
+                                   self.env_cfg['shelf_positions'])
         shelf_idx    = self.target_object_idx // 2
         target_shelf = np.array(shelf_positions[shelf_idx])
         dist_to_shelf = np.linalg.norm(husky_xy - target_shelf)
@@ -186,7 +188,10 @@ class MobileWarehouseEnvV2:
         obj_pos      = np.array(obj_pos)
         dist_to_obj  = np.linalg.norm(gripper_pos - obj_pos)
 
-        dropoff      = np.array(self.env_cfg['dropoff_position'] + [0.1])
+        # Use current randomized dropoff position
+        current_dropoff = getattr(self, 'current_dropoff',
+                                   self.env_cfg['dropoff_position'])
+        dropoff      = np.array(current_dropoff + [0.1])
         dist_dropoff = np.linalg.norm(obj_pos - dropoff)
 
         # Continuous shaping
@@ -251,14 +256,31 @@ class MobileWarehouseEnvV2:
         self.delivered_object = False
         self.phase_bonuses    = 0.0
 
-        # Pick target object first so curriculum can use shelf position
+        # Randomize shelf positions every episode
+        sx = np.random.uniform(1.5, 3.5)
+        sy = np.random.uniform(-1.5, 1.5)
+        self.current_shelf_positions = [
+            [sx,  sy],   # shelf 1
+            [-sx, -sy],  # shelf 2 opposite side
+        ]
+
+        # Randomize dropoff position
+        self.current_dropoff = [
+            np.random.uniform(-1.5, 1.5),
+            np.random.uniform(-1.5, 1.5)
+        ]
+
+        # Pick target object
         self.target_object_idx = np.random.randint(0, self.env_cfg['num_objects'])
 
-        # Curriculum-based start position
-        start_pos = self._get_curriculum_start()
+        # Random robot start anywhere in center zone
+        start_x = np.random.uniform(-1.0, 1.0)
+        start_y = np.random.uniform(-1.0, 1.0)
+        start_yaw = np.random.uniform(0, 2*np.pi)
         p.resetBasePositionAndOrientation(
-            self.husky_id, start_pos,
-            p.getQuaternionFromEuler([0, 0, np.random.uniform(0, 2*np.pi)])
+            self.husky_id,
+            [start_x, start_y, 0.15],
+            p.getQuaternionFromEuler([0, 0, start_yaw])
         )
         p.resetBaseVelocity(self.husky_id, [0,0,0], [0,0,0])
 
@@ -267,22 +289,42 @@ class MobileWarehouseEnvV2:
         for i, pos in enumerate(home):
             p.resetJointState(self.panda_id, i, pos)
 
-        # Reset objects
-        shelf_positions = self.env_cfg['shelf_positions']
-        base_positions  = [
-            [shelf_positions[0][0]-0.2, shelf_positions[0][1], 0.58],
-            [shelf_positions[0][0]+0.2, shelf_positions[0][1], 0.58],
-            [shelf_positions[1][0]-0.2, shelf_positions[1][1], 0.58],
-            [shelf_positions[1][0]+0.2, shelf_positions[1][1], 0.58],
+        # Place objects on randomized shelves with noise
+        base_positions = [
+            [self.current_shelf_positions[0][0]-0.2,
+             self.current_shelf_positions[0][1], 0.58],
+            [self.current_shelf_positions[0][0]+0.2,
+             self.current_shelf_positions[0][1], 0.58],
+            [self.current_shelf_positions[1][0]-0.2,
+             self.current_shelf_positions[1][1], 0.58],
+            [self.current_shelf_positions[1][0]+0.2,
+             self.current_shelf_positions[1][1], 0.58],
         ]
         for i, obj_id in enumerate(self.object_ids):
-            noise = np.random.uniform(-0.02, 0.02, 2)
+            noise = np.random.uniform(-0.05, 0.05, 2)
             pos   = [base_positions[i][0]+noise[0],
                      base_positions[i][1]+noise[1],
                      base_positions[i][2]]
             p.resetBasePositionAndOrientation(obj_id, pos, [0,0,0,1])
 
-        self.current_instruction = np.random.choice(self.task_instructions)
+        # Pick instruction that matches target object color
+        color_instructions = {
+            0: ["pick up the red box and deliver it",
+                "navigate to shelf and pick up the red box",
+                "get the red box and place it at dropoff"],
+            1: ["pick up the blue box and deliver it",
+                "navigate to shelf and pick up the blue box",
+                "get the blue box and place it at dropoff"],
+            2: ["pick up the green box and deliver it",
+                "navigate to shelf and pick up the green box",
+                "get the green box and place it at dropoff"],
+            3: ["pick up the yellow box and deliver it",
+                "navigate to shelf and pick up the yellow box",
+                "get the yellow box and place it at dropoff"],
+        }
+        self.current_instruction = np.random.choice(
+            color_instructions[self.target_object_idx]
+        )
         return self.get_camera_image(), self.current_instruction
 
     def step(self, action):
