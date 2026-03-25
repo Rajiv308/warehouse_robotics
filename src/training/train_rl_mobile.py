@@ -133,7 +133,7 @@ def train_mobile_ppo(config_path="configs/config_mobile.yaml"):
         cfg = yaml.safe_load(f)
 
     tc     = cfg['training']
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Mobile RL Training on: {device}")
 
     # PPO hyperparameters

@@ -1,0 +1,37 @@
+environment:
+  sim_timestep: 0.01
+  max_episode_steps: 600
+  num_objects: 4
+  workspace_size: 5.0
+  camera_width: 224
+  camera_height: 224
+  num_shelves: 2
+  shelf_positions:
+    - [2.0, 0.0]
+    - [-2.0, 0.0]
+  dropoff_position: [0.0, 2.0]
+
+model:
+  vision_backbone: resnet18
+  language_model: distilbert-base-uncased
+  vision_features: 512
+  language_features: 768
+  fusion_dim: 512           # bigger than local (256) for better capacity
+  action_dim: 10
+
+training:
+  batch_size: 64            # bigger batch on GPU
+  learning_rate: 0.00003    # slightly lower for stability
+  bc_epochs: 50             # more epochs
+  rl_episodes: 2000         # 10x more than local
+  gamma: 0.99
+  checkpoint_interval: 5    # save more frequently
+
+data:
+  num_demonstrations: 1000  # 3x more demos
+  train_split: 0.8
+  data_dir: data/demos_mobile
+
+logging:
+  log_dir: logs/cloud
+  tensorboard: true

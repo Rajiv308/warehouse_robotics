@@ -1,3 +1,11 @@
+"""
+Cloud BC training with:
+- CUDA GPU
+- Real robot state vectors (not zeros)
+- Larger batch size
+- More epochs
+- Unfrozen last 2 layers of DistilBERT for fine-tuning
+"""
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -13,39 +21,48 @@ from src.models.vla_model_mobile import MobileVLAModel, freeze_language_encoder
 from src.training.dataset_mobile import get_mobile_dataloaders
 
 
-def train_mobile_bc(config_path="configs/config_mobile.yaml"):
+def train_cloud_bc(config_path="configs/config_cloud.yaml"):
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
 
     tc     = cfg['training']
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Training on: {device}")
+    print(f"Cloud BC Training on: {device}")
+    if torch.cuda.is_available():
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
 
     model = MobileVLAModel(config_path).to(device)
-    freeze_language_encoder(model)
 
-    optimizer = optim.Adam(
+    # Freeze most of BERT but unfreeze last 2 transformer layers
+    freeze_language_encoder(model)
+    for i in [4, 5]:  # last 2 layers of DistilBERT
+        for param in model.language_encoder.bert.transformer.layer[i].parameters():
+            param.requires_grad = True
+
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Trainable parameters: {trainable:,}")
+
+    optimizer = optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
-        lr=tc['learning_rate']
+        lr=tc['learning_rate'],
+        weight_decay=0.01
     )
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=tc['bc_epochs'], eta_min=1e-6
+        optimizer, T_max=tc['bc_epochs'], eta_min=1e-7
     )
     criterion = nn.MSELoss()
 
     train_loader, val_loader = get_mobile_dataloaders(cfg, batch_size=tc['batch_size'])
-
-    writer = SummaryWriter(log_dir=cfg['logging']['log_dir'])
+    writer = SummaryWriter(log_dir="logs/cloud_bc")
     os.makedirs("checkpoints", exist_ok=True)
 
     best_val_loss = float('inf')
     global_step   = 0
 
-    print(f"Model parameters: {model.count_parameters():,}")
-    print(f"Starting mobile BC training for {tc['bc_epochs']} epochs...\n")
+    print(f"Starting Cloud BC for {tc['bc_epochs']} epochs...")
+    print(f"Train batches: {len(train_loader)}, Val: {len(val_loader)}\n")
 
     for epoch in range(tc['bc_epochs']):
-        # Training
         model.train()
         train_losses = []
 
@@ -64,12 +81,10 @@ def train_mobile_bc(config_path="configs/config_mobile.yaml"):
             optimizer.step()
 
             train_losses.append(loss.item())
-            writer.add_scalar('Loss/train_step', loss.item(), global_step)
             global_step += 1
 
         scheduler.step()
 
-        # Validation
         model.eval()
         val_losses = []
         with torch.no_grad():
@@ -77,40 +92,38 @@ def train_mobile_bc(config_path="configs/config_mobile.yaml"):
                 imgs    = imgs.to(device)
                 actions = actions.to(device)
                 states  = states.to(device)
-                predicted = model(imgs, list(instructions), states)
-                loss = criterion(predicted, actions)
+                loss = criterion(model(imgs, list(instructions), states), actions)
                 val_losses.append(loss.item())
 
         avg_train = np.mean(train_losses)
         avg_val   = np.mean(val_losses)
 
-        writer.add_scalar('Loss/train_epoch', avg_train, epoch)
-        writer.add_scalar('Loss/val_epoch',   avg_val,   epoch)
+        writer.add_scalar('CloudBC/train', avg_train, epoch)
+        writer.add_scalar('CloudBC/val',   avg_val,   epoch)
 
         print(f"Epoch {epoch+1:3d} | Train: {avg_train:.4f} | Val: {avg_val:.4f}")
 
         if avg_val < best_val_loss:
             best_val_loss = avg_val
             torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
+                'epoch':                epoch,
+                'model_state_dict':     model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'val_loss': best_val_loss,
+                'val_loss':             best_val_loss,
             }, "checkpoints/best_mobile_model.pth")
             print(f"  ✓ Best model saved (val={best_val_loss:.4f})")
 
-        if (epoch + 1) % tc['checkpoint_interval'] == 0:
+        if (epoch + 1) % 10 == 0:
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'val_loss': avg_val,
-            }, f"checkpoints/mobile_checkpoint_epoch_{epoch+1}.pth")
+            }, f"checkpoints/cloud_bc_epoch_{epoch+1}.pth")
 
     writer.close()
-    print(f"\nTraining complete! Best val loss: {best_val_loss:.4f}")
-    print("Best model saved to checkpoints/best_mobile_model.pth")
+    print(f"\nCloud BC complete! Best val loss: {best_val_loss:.4f}")
     return model
 
 
 if __name__ == "__main__":
-    train_mobile_bc()
+    train_cloud_bc()
