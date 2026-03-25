@@ -41,7 +41,7 @@ class MobileDemoDataset(Dataset):
 
         # Robot state: zeros as placeholder
         # (real state comes from env during RL, BC just needs the shape)
-        state  = torch.FloatTensor(9).uniform_(-1, 1)
+        state = torch.FloatTensor(sample['state']) if 'state' in sample and sample['state'] is not None else torch.FloatTensor(9).uniform_(-1, 1)
 
         return img, sample['instruction'], action, state
 
