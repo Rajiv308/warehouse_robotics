@@ -23,8 +23,15 @@ class ImprovedExpert:
         self.phase_steps      = 0
         self.grasp_constraint = None
         self.object_id        = object_ids[target_object_idx]
+        self.all_object_ids   = object_ids
         obj_pos, _            = p.getBasePositionAndOrientation(object_ids[target_object_idx])
         self.target_pos       = np.array(obj_pos)
+
+        # Store initial positions of ALL objects to freeze during navigation
+        self.initial_obj_positions = []
+        for oid in object_ids:
+            pos, orn = p.getBasePositionAndOrientation(oid)
+            self.initial_obj_positions.append((list(pos), list(orn)))
 
         # Use environment's current randomized dropoff if available
         if env is not None and hasattr(env, 'current_dropoff'):
@@ -83,10 +90,18 @@ class ImprovedExpert:
         tx, ty, tz = self.target_pos
         dropoff    = self.dropoff_pos
 
-        # Lock Husky during arm phases to prevent physics drift
+        # Lock Husky during arm phases
         if self.phase in [2, 3, 4, 5]:
             import pybullet as p_lock
             p_lock.resetBaseVelocity(self.husky_id, [0,0,0], [0,0,0])
+
+        # Freeze ALL objects during navigation to prevent falling
+        if self.phase in [0, 1] and hasattr(self, 'initial_obj_positions'):
+            import pybullet as p_frz
+            for i, oid in enumerate(self.all_object_ids):
+                pos, orn = self.initial_obj_positions[i]
+                p_frz.resetBasePositionAndOrientation(oid, pos, orn)
+                p_frz.resetBaseVelocity(oid, [0,0,0], [0,0,0])
 
         if self.phase == 0:
             # Navigate directly toward object position
@@ -187,7 +202,7 @@ class ImprovedExpert:
             while err < -np.pi: err += 2*np.pi
             action[0] = 1.0
             action[1] = 0.0
-            action[2] = float(np.clip(err * 2.0, -1.0, 1.0))
+            action[2] = float(np.clip(err * 3.0, -1.0, 1.0))  # faster turn
             action[3:9] = np.array([0, -0.785, 0, -2.356, 0, 1.571])
             action[9]   = 0.0
 
