@@ -113,6 +113,8 @@ class MobileWarehouseEnvV2:
             self.husky_id, -1, self.panda_id, -1,
             p.JOINT_FIXED, [0,0,0], [0,0,0.5], [0,0,0]
         )
+        # Allow constraint to move with high force
+        p.changeConstraint(self.attach_constraint, maxForce=10000)
         self.wheel_joints = []
         for j in range(p.getNumJoints(self.husky_id)):
             info = p.getJointInfo(self.husky_id, j)
