@@ -50,7 +50,13 @@ def train_cloud_bc(config_path="configs/config_cloud.yaml"):
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=tc['bc_epochs'], eta_min=1e-7
     )
-    criterion = nn.MSELoss()
+    # Weighted MSE: upweight gripper dim (index 9) so BC learns to close it.
+    # Without this, the 9 other dims dominate loss and gripper collapses to always-open.
+    action_weights = torch.ones(cfg['model']['action_dim'], device=device)
+    action_weights[9] = 10.0  # gripper dimension
+    def weighted_mse(pred, target):
+        return (action_weights * (pred - target) ** 2).mean()
+    criterion = weighted_mse
 
     train_loader, val_loader = get_mobile_dataloaders(cfg, batch_size=tc['batch_size'])
     writer = SummaryWriter(log_dir="logs/cloud_bc")

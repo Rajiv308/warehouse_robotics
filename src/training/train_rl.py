@@ -111,6 +111,22 @@ def preprocess_image(obs_np, device):
     return img.to(device)
 
 
+def load_action_stats(stats_path="data/demos/action_stats.json"):
+    """Load action normalization stats for denormalization."""
+    import json
+    with open(stats_path, 'r') as f:
+        stats = json.load(f)
+    action_min = np.array(stats['action_min'], dtype=np.float32)
+    action_max = np.array(stats['action_max'], dtype=np.float32)
+    action_range = np.maximum(action_max - action_min, 1e-6)
+    return action_min, action_max, action_range
+
+
+def denormalize_action(norm_action, action_min, action_range):
+    """Convert normalized [-1,1] action back to raw action for env."""
+    return action_min + (norm_action + 1.0) * 0.5 * action_range
+
+
 def train_ppo(config_path="configs/config.yaml"):
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
@@ -135,6 +151,9 @@ def train_ppo(config_path="configs/config.yaml"):
     # Shorter episodes for RL — arm reaches objects by step 50,
     # 200 steps is plenty for approach+grasp+lift (2.5x faster training)
     env.env_cfg['max_episode_steps'] = 200
+
+    # Load action normalization stats for denormalization
+    action_min, action_max, action_range = load_action_stats()
 
     policy = VLAPPOPolicy(config_path).to(device)
     freeze_language_encoder(policy)
@@ -181,7 +200,9 @@ def train_ppo(config_path="configs/config.yaml"):
                 action, log_prob, _, value = policy.get_action_and_value(img, [instruction])
 
             action_np = action.squeeze().numpy()
-            next_obs, reward, done, info = env.step(action_np)
+            action_np = np.clip(action_np, -1.0, 1.0)  # Clip to valid range
+            raw_action = denormalize_action(action_np, action_min, action_range)
+            next_obs, reward, done, info = env.step(raw_action)
 
             memory.images.append(img.squeeze(0))
             memory.instructions.append(instruction)

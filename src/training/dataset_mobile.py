@@ -2,14 +2,22 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import pickle
-import pybullet as p
+import json
 from torchvision import transforms
 
 
 class MobileDemoDataset(Dataset):
-    def __init__(self, data_path, augment=False):
+    def __init__(self, data_path, augment=False,
+                 stats_path="data/demos_mobile/action_stats.json"):
         with open(data_path, 'rb') as f:
             self.data = pickle.load(f)
+
+        # Load action normalization stats
+        with open(stats_path, 'r') as f:
+            stats = json.load(f)
+        self.action_min = np.array(stats['action_min'], dtype=np.float32)
+        self.action_max = np.array(stats['action_max'], dtype=np.float32)
+        self.action_range = np.maximum(self.action_max - self.action_min, 1e-6)
 
         normalize = transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
@@ -37,11 +45,18 @@ class MobileDemoDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.data[idx]
         img    = self.transform(sample['image'])
-        action = torch.FloatTensor(sample['action'])
 
-        # Robot state: zeros as placeholder
-        # (real state comes from env during RL, BC just needs the shape)
-        state = torch.FloatTensor(sample['state']) if 'state' in sample and sample['state'] is not None else torch.FloatTensor(9).uniform_(-1, 1)
+        # Normalize action to [-1, 1] range
+        raw_action = np.array(sample['action'], dtype=np.float32)
+        norm_action = 2.0 * (raw_action - self.action_min) / self.action_range - 1.0
+        action = torch.FloatTensor(norm_action)
+
+        # Robot state: use saved state if available, otherwise zeros
+        # (zeros are better than random noise — at least consistent)
+        if 'state' in sample and sample['state'] is not None:
+            state = torch.FloatTensor(sample['state'])
+        else:
+            state = torch.zeros(9)
 
         return img, sample['instruction'], action, state
 

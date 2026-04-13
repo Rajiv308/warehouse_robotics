@@ -32,7 +32,14 @@ def train_behavioral_cloning(config_path="configs/config.yaml"):
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=tc['bc_epochs'], eta_min=1e-6
     )
-    criterion = nn.MSELoss()
+    # Weighted MSE: upweight gripper dim (index 6) so BC learns to close it.
+    # Without this, the 6 arm joints dominate the loss and gripper collapses
+    # to always-open. Gripper weight 10x makes it ~equal importance to arm.
+    action_weights = torch.ones(cfg['model']['action_dim'], device=device)
+    action_weights[6] = 10.0  # gripper dimension
+    def weighted_mse(pred, target):
+        return (action_weights * (pred - target) ** 2).mean()
+    criterion = weighted_mse
 
     train_loader, val_loader = get_dataloaders(cfg, batch_size=tc['batch_size'])
     writer = SummaryWriter(log_dir=cfg['logging']['log_dir'])

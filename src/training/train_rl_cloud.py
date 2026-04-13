@@ -130,6 +130,22 @@ def preprocess(obs_np, state_np, device):
     return img.to(device), state.to(device)
 
 
+def load_action_stats(stats_path="data/demos_mobile/action_stats.json"):
+    """Load action normalization stats for denormalization."""
+    import json
+    with open(stats_path, 'r') as f:
+        stats = json.load(f)
+    action_min = np.array(stats['action_min'], dtype=np.float32)
+    action_max = np.array(stats['action_max'], dtype=np.float32)
+    action_range = np.maximum(action_max - action_min, 1e-6)
+    return action_min, action_max, action_range
+
+
+def denormalize_action(norm_action, action_min, action_range):
+    """Convert normalized [-1,1] action back to raw action for env."""
+    return action_min + (norm_action + 1.0) * 0.5 * action_range
+
+
 def compute_shaped_reward(env, prev_dist_to_shelf, prev_dist_to_obj):
     """
     Dense reward shaping for full task:
@@ -227,6 +243,9 @@ def train_cloud_ppo(config_path="configs/config_cloud.yaml"):
     else:
         print("No BC checkpoint - training from scratch")
 
+    # Load action normalization stats for denormalization
+    action_min, action_max, action_range = load_action_stats()
+
     optimizer = torch.optim.Adam(
         filter(lambda p: p.requires_grad, policy.parameters()),
         lr=lr, eps=1e-5
@@ -293,7 +312,9 @@ def train_cloud_ppo(config_path="configs/config_cloud.yaml"):
                 )
 
             action_np  = action.squeeze().cpu().numpy()
-            next_obs, _, done, info = env.step(action_np)
+            action_np  = np.clip(action_np, -1.0, 1.0)  # Clip to valid range
+            raw_action = denormalize_action(action_np, action_min, action_range)
+            next_obs, _, done, info = env.step(raw_action)
             next_state = get_robot_state(env)
 
             # Compute shaped reward
