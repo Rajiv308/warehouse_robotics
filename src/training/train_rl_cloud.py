@@ -125,14 +125,16 @@ def get_robot_state(env):
 
 
 def preprocess(obs_np, state_np, device):
-    """Preprocess image EXACTLY like BC training — with ImageNet normalization."""
+    """Preprocess image EXACTLY like BC training — with ImageNet normalization.
+    Handles any input size by resizing to 224x224 (matching BC training)."""
     from torchvision import transforms
-    normalize = transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
-    )
-    img = torch.FloatTensor(obs_np).permute(2,0,1) / 255.0
-    img = normalize(img).unsqueeze(0)
+    preprocess_transform = transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    img = preprocess_transform(obs_np).unsqueeze(0)
     state = torch.FloatTensor(state_np).unsqueeze(0)
     return img.to(device), state.to(device)
 
@@ -240,6 +242,10 @@ def train_cloud_ppo(config_path="configs/config_cloud.yaml"):
         curriculum_stage=current_stage
     )
     env.initialize()
+    # Render at 84x84 for speed (7x fewer pixels), upscale in preprocess()
+    env.env_cfg['camera_width'] = 84
+    env.env_cfg['camera_height'] = 84
+    print(f"Camera resolution: 84x84 (upscaled to 224x224 in preprocessing)")
 
     policy = CloudVLAPPOPolicy(config_path).to(device)
     freeze_language_encoder(policy)
