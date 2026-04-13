@@ -124,8 +124,8 @@ def reset_env(husky, panda, box_id, shelf_pos):
 
 
 def step_env(action, husky, panda, wheel_joints):
-    vx = float(action[0]) * 5.0
-    wz = float(action[2]) * 3.0
+    vx = float(np.clip(action[0], -1, 1)) * 2.0   # max 2 m/s wheel velocity
+    wz = float(np.clip(action[2], -1, 1)) * 1.5   # max 1.5 rad/s turning
     wheel_radius, wheel_base = 0.165, 0.555
     left_vel = (vx - wz * wheel_base / 2) / wheel_radius
     right_vel = (vx + wz * wheel_base / 2) / wheel_radius
