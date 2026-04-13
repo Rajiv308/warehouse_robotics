@@ -132,6 +132,9 @@ def train_ppo(config_path="configs/config.yaml"):
 
     env = WarehouseEnv(render=False)
     env.initialize()
+    # Shorter episodes for RL — arm reaches objects by step 50,
+    # 200 steps is plenty for approach+grasp+lift (2.5x faster training)
+    env.env_cfg['max_episode_steps'] = 200
 
     policy = VLAPPOPolicy(config_path).to(device)
     freeze_language_encoder(policy)
