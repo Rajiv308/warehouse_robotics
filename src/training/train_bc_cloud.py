@@ -53,10 +53,19 @@ def train_cloud_bc(config_path="configs/config_cloud.yaml"):
     # Weighted MSE: upweight gripper dim (index 9) so BC learns to close it.
     # Without this, the 9 other dims dominate loss and gripper collapses to always-open.
     action_weights = torch.ones(cfg['model']['action_dim'], device=device)
-    action_weights[9] = 3.0  # gripper dimension — 3x balances arm vs gripper
-    def weighted_mse(pred, target):
-        return (action_weights * (pred - target) ** 2).mean()
-    criterion = weighted_mse
+    action_weights[9] = 5.0  # gripper dimension weight
+    def weighted_mse_with_sample_balance(pred, target):
+        # Per-dimension weighting
+        loss = action_weights * (pred - target) ** 2
+        # Per-SAMPLE weighting: upweight samples where gripper is closed
+        # target dim 9 normalized: < 0 = close, > 0 = open
+        # Give 10x weight to close-gripper samples to fight 92:8 imbalance
+        gripper_target = target[:, 9]
+        sample_weight = torch.where(gripper_target < 0.0,
+                                     torch.tensor(10.0, device=target.device),
+                                     torch.tensor(1.0, device=target.device))
+        return (loss * sample_weight.unsqueeze(1)).mean()
+    criterion = weighted_mse_with_sample_balance
 
     train_loader, val_loader = get_mobile_dataloaders(cfg, batch_size=tc['batch_size'])
     writer = SummaryWriter(log_dir="logs/cloud_bc")

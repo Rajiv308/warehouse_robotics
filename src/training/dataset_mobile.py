@@ -46,10 +46,8 @@ class MobileDemoDataset(Dataset):
         sample = self.data[idx]
         img    = self.transform(sample['image'])
 
-        # Normalize action to [-1, 1] range
-        raw_action = np.array(sample['action'], dtype=np.float32)
-        norm_action = 2.0 * (raw_action - self.action_min) / self.action_range - 1.0
-        action = torch.FloatTensor(norm_action)
+        # Raw actions — no normalization needed since Tanh was removed.
+        action = torch.FloatTensor(np.array(sample['action'], dtype=np.float32))
 
         # Robot state: use saved state if available, otherwise zeros
         # (zeros are better than random noise — at least consistent)

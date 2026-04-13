@@ -111,7 +111,8 @@ class MobileActionHead(nn.Module):
             nn.Linear(256, 128),
             nn.ReLU(),
             nn.Linear(128, action_dim),
-            nn.Tanh()
+            # NO Tanh — arm joints need values outside [-1,1]
+            # Navigation (vx,wz) and gripper naturally stay small
         )
 
     def forward(self, x):

@@ -92,7 +92,8 @@ class ActionHead(nn.Module):
             nn.Linear(256, 128),
             nn.ReLU(),
             nn.Linear(128, action_dim),
-            nn.Tanh()  # bound actions to [-1, 1]
+            # NO Tanh — arm joints need values like -2.356, 1.571
+            # Tanh clips to [-1,1] which prevents reaching target positions
         )
 
     def forward(self, x):

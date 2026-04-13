@@ -217,9 +217,8 @@ def train_ppo(config_path="configs/config.yaml"):
                 action, log_prob, _, value = policy.get_action_and_value(img, [instruction])
 
             action_np = action.squeeze().numpy()
-            action_np = np.clip(action_np, -1.0, 1.0)  # Clip to valid range
-            raw_action = denormalize_action(action_np, action_min, action_range)
-            next_obs, reward, done, info = env.step(raw_action)
+            # No clipping/denormalization — model outputs raw joint angles directly
+            next_obs, reward, done, info = env.step(action_np)
 
             memory.images.append(img.squeeze(0))
             memory.instructions.append(instruction)

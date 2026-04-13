@@ -118,10 +118,11 @@ class CloudVLAPPOPolicy(nn.Module):
 
 
 def get_robot_state(env):
-    base_pos, base_orn = p.getBasePositionAndOrientation(env.husky_id)
-    yaw = p.getEulerFromQuaternion(base_orn)[2]
-    arm_joints = [p.getJointState(env.panda_id, j)[0] for j in range(6)]
-    return np.array([base_pos[0], base_pos[1], yaw] + arm_joints, dtype=np.float32)
+    # BC was trained WITHOUT state data (all zeros in demos).
+    # State encoder learned zeros→fixed features. Feeding real states
+    # during RL corrupts the fusion output since the encoder is frozen.
+    # Feed zeros to match BC training — robot navigates from vision only.
+    return np.zeros(9, dtype=np.float32)
 
 
 def preprocess(obs_np, state_np, device):
@@ -336,9 +337,8 @@ def train_cloud_ppo(config_path="configs/config_cloud.yaml"):
                 )
 
             action_np  = action.squeeze().cpu().numpy()
-            action_np  = np.clip(action_np, -1.0, 1.0)  # Clip to valid range
-            raw_action = denormalize_action(action_np, action_min, action_range)
-            next_obs, _, done, info = env.step(raw_action)
+            # No clipping/denormalization — model outputs raw values directly
+            next_obs, _, done, info = env.step(action_np)
             next_state = get_robot_state(env)
 
             # Compute shaped reward

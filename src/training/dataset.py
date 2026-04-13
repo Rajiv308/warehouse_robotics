@@ -54,10 +54,9 @@ class DemoDataset(Dataset):
         # Process image
         img = self.transform(sample['image'])  # (3, 224, 224)
 
-        # Normalize action to [-1, 1] range (so Tanh model can represent it)
-        raw_action = np.array(sample['action'], dtype=np.float32)
-        norm_action = 2.0 * (raw_action - self.action_min) / self.action_range - 1.0
-        action = torch.FloatTensor(norm_action)
+        # Raw actions — no normalization needed since Tanh was removed.
+        # Model can now output unbounded values matching expert joint angles.
+        action = torch.FloatTensor(np.array(sample['action'], dtype=np.float32))
 
         # Instruction stays as string (DistilBERT tokenizes it internally)
         instruction = sample['instruction']
