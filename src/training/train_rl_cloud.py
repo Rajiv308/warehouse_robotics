@@ -125,7 +125,14 @@ def get_robot_state(env):
 
 
 def preprocess(obs_np, state_np, device):
-    img   = torch.FloatTensor(obs_np).permute(2,0,1).unsqueeze(0) / 255.0
+    """Preprocess image EXACTLY like BC training — with ImageNet normalization."""
+    from torchvision import transforms
+    normalize = transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
+    img = torch.FloatTensor(obs_np).permute(2,0,1) / 255.0
+    img = normalize(img).unsqueeze(0)
     state = torch.FloatTensor(state_np).unsqueeze(0)
     return img.to(device), state.to(device)
 
@@ -242,6 +249,17 @@ def train_cloud_ppo(config_path="configs/config_cloud.yaml"):
         print("BC weights loaded!")
     else:
         print("No BC checkpoint - training from scratch")
+
+    # Freeze vision encoder + fusion + state encoder from BC
+    # Only train actor/critic heads — BC learned the representation, RL adjusts policy
+    for param in policy.vision_encoder.parameters():
+        param.requires_grad = False
+    for param in policy.fusion.parameters():
+        param.requires_grad = False
+    for param in policy.state_encoder.parameters():
+        param.requires_grad = False
+    trainable = sum(p.numel() for p in policy.parameters() if p.requires_grad)
+    print(f"RL trainable parameters (actor+critic only): {trainable:,}")
 
     # Load action normalization stats for denormalization
     action_min, action_max, action_range = load_action_stats()

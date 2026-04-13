@@ -36,7 +36,7 @@ def train_behavioral_cloning(config_path="configs/config.yaml"):
     # Without this, the 6 arm joints dominate the loss and gripper collapses
     # to always-open. Gripper weight 10x makes it ~equal importance to arm.
     action_weights = torch.ones(cfg['model']['action_dim'], device=device)
-    action_weights[6] = 10.0  # gripper dimension
+    action_weights[6] = 3.0  # gripper dimension — 3x balances arm (67%) vs gripper (33%)
     def weighted_mse(pred, target):
         return (action_weights * (pred - target) ** 2).mean()
     criterion = weighted_mse

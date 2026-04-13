@@ -107,7 +107,14 @@ class VLAPPOPolicy(nn.Module):
 
 
 def preprocess_image(obs_np, device):
-    img = torch.FloatTensor(obs_np).permute(2, 0, 1).unsqueeze(0) / 255.0
+    """Preprocess image EXACTLY like BC training — with ImageNet normalization."""
+    from torchvision import transforms
+    normalize = transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
+    img = torch.FloatTensor(obs_np).permute(2, 0, 1) / 255.0
+    img = normalize(img).unsqueeze(0)
     return img.to(device)
 
 
@@ -163,6 +170,16 @@ def train_ppo(config_path="configs/config.yaml"):
         print("BC weights loaded - starting from pretrained policy")
     else:
         print("No BC checkpoint found - training from scratch")
+
+    # Freeze vision encoder + fusion from BC — only train actor/critic heads
+    # BC learned good visual features; RL should only adjust the policy mapping
+    # This reduces trainable params from ~12M to ~100K, making RL actually feasible
+    for param in policy.vision_encoder.parameters():
+        param.requires_grad = False
+    for param in policy.fusion.parameters():
+        param.requires_grad = False
+    trainable = sum(p.numel() for p in policy.parameters() if p.requires_grad)
+    print(f"RL trainable parameters (actor+critic only): {trainable:,}")
 
     optimizer = torch.optim.Adam(
         filter(lambda p: p.requires_grad, policy.parameters()),
