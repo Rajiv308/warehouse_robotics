@@ -179,46 +179,56 @@ class WarehouseEnv:
                                      targetPosition=gripper_pos, force=10)
 
     def compute_reward(self):
-        """Dense reward: approach + grasp + lift"""
+        """Dense reward with smooth grasp incentives."""
         gripper_state = p.getLinkState(self.robot_id, 11)
         gripper_pos = np.array(gripper_state[0])
 
-        # Find closest object and track it
+        # Find closest object
         min_dist = float('inf')
         closest_obj_pos = None
-        closest_obj_id = None
         for obj_id in self.object_ids:
             obj_pos, _ = p.getBasePositionAndOrientation(obj_id)
             dist = np.linalg.norm(gripper_pos - np.array(obj_pos))
             if dist < min_dist:
                 min_dist = dist
                 closest_obj_pos = np.array(obj_pos)
-                closest_obj_id = obj_id
 
         reward = 0.0
 
-        # 1. Approach reward — dense signal for closing distance
+        # 1. Approach — dense, always active
         reward += -min_dist * 2.0
 
-        # 2. Close proximity bonus — gripper within 0.05m of object
-        if min_dist < 0.05:
+        # 2. Proximity bonuses — graduated
+        if min_dist < 0.15:
+            reward += 2.0
+        if min_dist < 0.08:
             reward += 5.0
             self._near_object = True
         else:
             self._near_object = False
 
-        # 3. Grasp reward — object lifted off table (z > 0.1)
-        if closest_obj_pos is not None and closest_obj_pos[2] > 0.10:
+        # 3. Gripper close incentive — reward closing when near object
+        gripper_joint = p.getJointState(self.robot_id, 9)[0]  # 0=closed, 0.04=open
+        if min_dist < 0.10 and gripper_joint < 0.02:
+            reward += 8.0  # strong signal: "close gripper when near"
+
+        # 4. Object movement — graduated, starts at z > 0.06 (barely moved)
+        obj_z = closest_obj_pos[2] if closest_obj_pos is not None else 0
+        if obj_z > 0.06:
             reward += 10.0
             self._grasped = True
         else:
             self._grasped = False
+        if obj_z > 0.08:
+            reward += 20.0
+        if obj_z > 0.12:
+            reward += 30.0
 
-        # 4. Lift reward — higher is better once grasped
-        if self._grasped and closest_obj_pos is not None:
-            reward += closest_obj_pos[2] * 20.0
+        # 5. Continuous lift reward
+        if self._grasped:
+            reward += obj_z * 50.0
 
-        # 5. Time penalty — small push to act efficiently
+        # 6. Time penalty
         reward -= 0.01
 
         return reward
@@ -269,7 +279,7 @@ class WarehouseEnv:
         done = success or self.step_count >= self.env_cfg['max_episode_steps']
 
         if success:
-            reward += 50.0  # big terminal bonus
+            reward += 200.0  # massive terminal bonus
 
         return obs, reward, done, {"instruction": self.current_instruction, "success": success}
 
