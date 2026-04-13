@@ -179,20 +179,49 @@ class WarehouseEnv:
                                      targetPosition=gripper_pos, force=10)
 
     def compute_reward(self):
-        """Simple reward: how close is the gripper to the nearest object?"""
-        # Get gripper position
+        """Dense reward: approach + grasp + lift"""
         gripper_state = p.getLinkState(self.robot_id, 11)
         gripper_pos = np.array(gripper_state[0])
-        
-        # Find closest object
+
+        # Find closest object and track it
         min_dist = float('inf')
+        closest_obj_pos = None
+        closest_obj_id = None
         for obj_id in self.object_ids:
             obj_pos, _ = p.getBasePositionAndOrientation(obj_id)
             dist = np.linalg.norm(gripper_pos - np.array(obj_pos))
-            min_dist = min(min_dist, dist)
-        
-        # Reward is negative distance (closer = higher reward)
-        return -min_dist
+            if dist < min_dist:
+                min_dist = dist
+                closest_obj_pos = np.array(obj_pos)
+                closest_obj_id = obj_id
+
+        reward = 0.0
+
+        # 1. Approach reward — dense signal for closing distance
+        reward += -min_dist * 2.0
+
+        # 2. Close proximity bonus — gripper within 0.05m of object
+        if min_dist < 0.05:
+            reward += 5.0
+            self._near_object = True
+        else:
+            self._near_object = False
+
+        # 3. Grasp reward — object lifted off table (z > 0.1)
+        if closest_obj_pos is not None and closest_obj_pos[2] > 0.10:
+            reward += 10.0
+            self._grasped = True
+        else:
+            self._grasped = False
+
+        # 4. Lift reward — higher is better once grasped
+        if self._grasped and closest_obj_pos is not None:
+            reward += closest_obj_pos[2] * 20.0
+
+        # 5. Time penalty — small push to act efficiently
+        reward -= 0.01
+
+        return reward
 
     def reset(self):
         """Reset environment for a new episode"""
@@ -209,9 +238,14 @@ class WarehouseEnv:
             base_pos = [0.5 + noise[0], (i-1)*0.3 + noise[1], 0.05]
             p.resetBasePositionAndOrientation(obj_id, base_pos, [0,0,0,1])
         
+        # Reset internal state tracking
+        self._near_object = False
+        self._grasped = False
+        self._lift_count = 0
+
         # Pick a random instruction
         self.current_instruction = np.random.choice(self.task_instructions)
-        
+
         return self.get_camera_image(), self.current_instruction
 
     def step(self, action):
@@ -219,12 +253,25 @@ class WarehouseEnv:
         self.apply_action(action)
         p.stepSimulation()
         self.step_count += 1
-        
+
         obs = self.get_camera_image()
         reward = self.compute_reward()
-        done = self.step_count >= self.env_cfg['max_episode_steps']
-        
-        return obs, reward, done, {"instruction": self.current_instruction}
+
+        # Success: object lifted and held for 5+ steps
+        if not hasattr(self, '_lift_count'):
+            self._lift_count = 0
+        if self._grasped:
+            self._lift_count += 1
+        else:
+            self._lift_count = 0
+
+        success = self._lift_count >= 5
+        done = success or self.step_count >= self.env_cfg['max_episode_steps']
+
+        if success:
+            reward += 50.0  # big terminal bonus
+
+        return obs, reward, done, {"instruction": self.current_instruction, "success": success}
 
     def initialize(self):
         """Full initialization sequence"""

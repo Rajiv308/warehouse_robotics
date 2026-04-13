@@ -26,6 +26,15 @@ class MobileWarehouseEnvV2:
             self.physics_client = p.connect(p.GUI)
         else:
             self.physics_client = p.connect(p.DIRECT)
+            # Try GPU-accelerated rendering via EGL (10-50x faster on Linux+NVIDIA)
+            try:
+                egl = p.loadPlugin("eglRendererPlugin")
+                if egl >= 0:
+                    print("EGL GPU rendering enabled!")
+                else:
+                    print("EGL plugin not available, using CPU rendering")
+            except Exception:
+                print("EGL not available, using CPU rendering")
 
         self.task_instructions = [
             "navigate to shelf one and pick up the red box",

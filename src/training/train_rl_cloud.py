@@ -141,7 +141,9 @@ def compute_shaped_reward(env, prev_dist_to_shelf, prev_dist_to_obj):
     husky_pos, _ = p.getBasePositionAndOrientation(env.husky_id)
     husky_xy     = np.array(husky_pos[:2])
 
-    shelf_positions = env.env_cfg['shelf_positions']
+    # Use dynamic randomized positions, not static config
+    shelf_positions = getattr(env, 'current_shelf_positions',
+                              env.env_cfg['shelf_positions'])
     shelf_idx    = env.target_object_idx // 2
     target_shelf = np.array(shelf_positions[shelf_idx])
     dist_to_shelf = np.linalg.norm(husky_xy - target_shelf)
@@ -154,7 +156,9 @@ def compute_shaped_reward(env, prev_dist_to_shelf, prev_dist_to_obj):
     obj_pos      = np.array(obj_pos)
     dist_to_obj  = np.linalg.norm(gripper_pos - obj_pos)
 
-    dropoff      = np.array(env.env_cfg['dropoff_position'] + [0.1])
+    current_dropoff = getattr(env, 'current_dropoff',
+                              env.env_cfg['dropoff_position'])
+    dropoff      = np.array(current_dropoff + [0.1])
     dist_dropoff = np.linalg.norm(obj_pos - dropoff)
 
     # Progress rewards (positive when getting closer)
@@ -249,12 +253,13 @@ def train_cloud_ppo(config_path="configs/config_cloud.yaml"):
     total_episodes   = 0
     global_step      = 0
 
-    # Initial distances for progress reward
+    # Initial distances for progress reward (use dynamic positions)
     husky_pos, _ = p.getBasePositionAndOrientation(env.husky_id)
-    shelf_positions = env.env_cfg['shelf_positions']
+    init_shelf_positions = getattr(env, 'current_shelf_positions',
+                                   env.env_cfg['shelf_positions'])
     shelf_idx = env.target_object_idx // 2
     prev_dist_shelf = np.linalg.norm(
-        np.array(husky_pos[:2]) - np.array(shelf_positions[shelf_idx])
+        np.array(husky_pos[:2]) - np.array(init_shelf_positions[shelf_idx])
     )
     gripper_state = p.getLinkState(env.panda_id, 11)
     obj_pos, _ = p.getBasePositionAndOrientation(env.object_ids[env.target_object_idx])
@@ -330,11 +335,13 @@ def train_cloud_ppo(config_path="configs/config_cloud.yaml"):
                 obs, instruction = env.reset()
                 robot_state      = get_robot_state(env)
 
-                # Reset distances
+                # Reset distances (use dynamic positions after reset)
                 husky_pos, _ = p.getBasePositionAndOrientation(env.husky_id)
+                reset_shelf_positions = getattr(env, 'current_shelf_positions',
+                                                env.env_cfg['shelf_positions'])
                 shelf_idx = env.target_object_idx // 2
                 prev_dist_shelf = np.linalg.norm(
-                    np.array(husky_pos[:2]) - np.array(shelf_positions[shelf_idx])
+                    np.array(husky_pos[:2]) - np.array(reset_shelf_positions[shelf_idx])
                 )
                 gripper_state = p.getLinkState(env.panda_id, 11)
                 obj_pos, _ = p.getBasePositionAndOrientation(
