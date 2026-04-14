@@ -134,6 +134,7 @@ def rollout_step(env, action_np):
 
 def evaluate_policy(policy, env, episodes=20):
     policy.eval()
+    device = next(policy.parameters()).device
     rewards = []
     success = 0
     grasp = 0
@@ -148,7 +149,7 @@ def evaluate_policy(policy, env, episodes=20):
             max_z = 0.0
 
             for _ in range(env.env_cfg["max_episode_steps"]):
-                st = torch.FloatTensor(state).unsqueeze(0)
+                st = torch.FloatTensor(state).unsqueeze(0).to(device)
                 action_np = policy.actor_mean(st).squeeze().cpu().numpy()
                 reward, done, info = rollout_step(env, action_np)
                 ep_reward += reward
