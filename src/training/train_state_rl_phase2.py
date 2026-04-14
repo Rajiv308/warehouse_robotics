@@ -154,12 +154,32 @@ def compute_reward(husky, panda, box_id, shelf_pos, dropoff_pos):
     do = np.linalg.norm(gripper_pos - obj_pos)
     dd = np.linalg.norm(obj_pos[:2] - np.array(dropoff_pos))
 
+    # Dense approach rewards
     reward = -0.3 * ds - 0.5 * do - 0.2 * dd
-    if ds < 1.0: reward += 1.0
-    if do < 0.2: reward += 2.0
-    if do < 0.08: reward += 3.0
-    if obj_pos[2] > 0.65: reward += 5.0
-    if dd < 0.5 and obj_pos[2] > 0.1: reward += 10.0
+
+    # Navigation milestones
+    if ds < 1.5: reward += 1.0
+    if ds < 0.8: reward += 2.0
+
+    # Reaching milestones
+    if do < 0.3: reward += 3.0
+    if do < 0.15: reward += 5.0
+    if do < 0.08: reward += 8.0
+
+    # Gripper close incentive — close when near object
+    gripper_joint = p.getJointState(panda, 9)[0]
+    if do < 0.15 and gripper_joint < 0.02:
+        reward += 10.0  # TRY to grasp when close
+
+    # Object lifted (starts at z=0.58 on shelf)
+    if obj_pos[2] > 0.62: reward += 15.0   # barely lifted
+    if obj_pos[2] > 0.70: reward += 25.0   # clearly lifted
+    if obj_pos[2] > 0.80: reward += 40.0   # high lift
+
+    # Carrying toward dropoff
+    if obj_pos[2] > 0.3 and dd < 2.0: reward += 20.0
+    if obj_pos[2] > 0.3 and dd < 1.0: reward += 50.0
+    if obj_pos[2] > 0.1 and dd < 0.5: reward += 100.0  # delivered!
 
     return reward, ds, do, dd
 
