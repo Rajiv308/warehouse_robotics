@@ -27,7 +27,7 @@ from src.env.warehouse_env_mobile_v2 import MobileWarehouseEnvV2
 
 
 class MobileStatePolicy(nn.Module):
-    def __init__(self, state_dim=22, action_dim=10):
+    def __init__(self, state_dim=21, action_dim=10):
         super().__init__()
         self.actor_mean = nn.Sequential(
             nn.Linear(state_dim, 512), nn.ReLU(),
