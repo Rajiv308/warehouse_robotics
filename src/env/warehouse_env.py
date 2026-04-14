@@ -33,6 +33,7 @@ class WarehouseEnv:
         self.current_instruction = None
         self.robot_id = None
         self.object_ids = []
+        self.grasp_constraint = None
         
     def setup_world(self):
         """Set up physics, gravity, and load the ground plane"""
@@ -160,6 +161,7 @@ class WarehouseEnv:
 
     def apply_action(self, action):
         """Apply 7-dim action: 6 joint angles + 1 gripper"""
+        action = np.asarray(action, dtype=np.float32)
         arm_action = action[:6]
         gripper_action = action[6]
         
@@ -177,6 +179,43 @@ class WarehouseEnv:
         for gj in self.gripper_joints:
             p.setJointMotorControl2(self.robot_id, gj, p.POSITION_CONTROL,
                                      targetPosition=gripper_pos, force=10)
+
+    def _release_grasp_constraint(self):
+        if self.grasp_constraint is not None:
+            try:
+                p.removeConstraint(self.grasp_constraint)
+            except Exception:
+                pass
+            self.grasp_constraint = None
+
+    def _update_grasp_constraint(self):
+        """Attach the target object when the fingers close around it."""
+        metrics = self.get_target_metrics()
+
+        if not metrics["gripper_closed"]:
+            self._release_grasp_constraint()
+            return metrics
+
+        if self.grasp_constraint is None:
+            close_enough = (
+                metrics["dist"] < 0.075 and
+                metrics["obj_z"] < 0.09 and
+                metrics["obj_speed"] < 1.5
+            )
+            if close_enough:
+                target_id = metrics["target_id"]
+                self.grasp_constraint = p.createConstraint(
+                    self.robot_id, 11,
+                    target_id, -1,
+                    p.JOINT_FIXED,
+                    [0, 0, 0],
+                    [0, 0, 0.02],
+                    [0, 0, 0]
+                )
+                p.changeConstraint(self.grasp_constraint, maxForce=200)
+
+        metrics["attached"] = self.grasp_constraint is not None
+        return metrics
 
     def compute_reward(self):
         """Reward for deliberate grasping — not flinging."""
@@ -213,6 +252,9 @@ class WarehouseEnv:
         if dist < 0.06 and gripper_closed:
             reward += 8.0
 
+        if self.grasp_constraint is not None:
+            reward += 12.0
+
         # 5. REAL grasp: object near gripper + lifted + gripper closed + object NOT flying
         self._grasped = False
         self._near_object = dist < 0.08
@@ -228,7 +270,7 @@ class WarehouseEnv:
             reward -= 10.0  # object airborne but far from gripper = fling
 
         # 7. Smooth motion bonus — penalize jerky actions
-        if hasattr(self, '_prev_action'):
+        if self._prev_action is not None and self._current_action is not None:
             action_delta = np.linalg.norm(
                 np.array(self._current_action[:6]) - np.array(self._prev_action[:6]))
             if action_delta < 0.3:
@@ -255,8 +297,10 @@ class WarehouseEnv:
             noise = np.random.uniform(-0.05, 0.05, 2)
             base_pos = [0.5 + noise[0], (i-1)*0.3 + noise[1], 0.05]
             p.resetBasePositionAndOrientation(obj_id, base_pos, [0,0,0,1])
-        
+            p.resetBaseVelocity(obj_id, [0,0,0], [0,0,0])
+
         # Reset internal state tracking
+        self._release_grasp_constraint()
         self._near_object = False
         self._grasped = False
         self._lift_count = 0
@@ -270,6 +314,44 @@ class WarehouseEnv:
 
         return self.get_camera_image(), self.current_instruction
 
+    def get_target_metrics(self):
+        """Return the current target-object metrics used by reward/success logic."""
+        target_id = self.object_ids[getattr(self, '_target_idx', 0)]
+        obj_pos, _ = p.getBasePositionAndOrientation(target_id)
+        obj_pos = np.array(obj_pos)
+        obj_vel, _ = p.getBaseVelocity(target_id)
+        obj_speed = np.linalg.norm(obj_vel)
+        gripper_pos = np.array(p.getLinkState(self.robot_id, 11)[0])
+        dist = np.linalg.norm(gripper_pos - obj_pos)
+        gripper_opening = p.getJointState(self.robot_id, 9)[0]
+        gripper_closed = gripper_opening < 0.02
+        return {
+            "target_id": target_id,
+            "obj_pos": obj_pos,
+            "obj_z": float(obj_pos[2]),
+            "obj_speed": float(obj_speed),
+            "gripper_pos": gripper_pos,
+            "dist": float(dist),
+            "gripper_closed": bool(gripper_closed),
+        }
+
+    def update_success_state(self):
+        """Update lift counters and return whether the task is successful."""
+        metrics = self._update_grasp_constraint()
+        stable_hold = (
+            metrics.get("attached", False) and
+            metrics["obj_z"] > 0.09 and
+            metrics["gripper_closed"] and
+            metrics["obj_speed"] < 1.5
+        )
+        self._grasped = stable_hold
+        if stable_hold:
+            self._lift_count += 1
+        else:
+            self._lift_count = 0
+        success = self._lift_count >= 4
+        return success, metrics
+
     def step(self, action):
         """Run one simulation step"""
         self._prev_action = self._current_action
@@ -281,21 +363,20 @@ class WarehouseEnv:
         obs = self.get_camera_image()
         reward = self.compute_reward()
 
-        # Success: object lifted and held for 5+ steps
-        if not hasattr(self, '_lift_count'):
-            self._lift_count = 0
-        if self._grasped:
-            self._lift_count += 1
-        else:
-            self._lift_count = 0
-
-        success = self._lift_count >= 15  # must hold for 15 steps (not just a momentary fling)
+        success, metrics = self.update_success_state()
         done = success or self.step_count >= self.env_cfg['max_episode_steps']
 
         if success:
-            reward += 200.0  # massive terminal bonus
+            reward += 100.0  # large terminal bonus for a stable held lift
 
-        return obs, reward, done, {"instruction": self.current_instruction, "success": success}
+        return obs, reward, done, {
+            "instruction": self.current_instruction,
+            "success": success,
+            "target_dist": metrics["dist"],
+            "target_obj_z": metrics["obj_z"],
+            "target_obj_speed": metrics["obj_speed"],
+            "gripper_closed": metrics["gripper_closed"],
+        }
 
     def initialize(self):
         """Full initialization sequence"""

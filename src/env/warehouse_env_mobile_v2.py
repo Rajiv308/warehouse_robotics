@@ -53,12 +53,14 @@ class MobileWarehouseEnvV2:
         self.object_ids           = []
         self.shelf_ids            = []
         self.target_object_idx    = 0
+        self.grasp_constraint     = None
 
         # Phase tracking for reward shaping
         self.reached_shelf    = False
         self.reached_object   = False
         self.grasped_object   = False
         self.delivered_object = False
+        self.lifted_object    = False
         self.phase_bonuses    = 0.0
 
     def setup_world(self):
@@ -175,66 +177,122 @@ class MobileWarehouseEnvV2:
         return np.array(rgb, dtype=np.uint8).reshape(h, w, 4)[:,:,:3]
 
     def compute_reward(self):
-        """
-        Shaped reward with phase bonuses.
-        Each milestone gives a one-time bonus + continuous distance shaping.
-        """
-        husky_pos, _ = p.getBasePositionAndOrientation(self.husky_id)
-        husky_xy     = np.array(husky_pos[:2])
+        metrics = self._update_task_status()
 
-        # Use current randomized shelf positions
-        shelf_positions = getattr(self, 'current_shelf_positions',
-                                   self.env_cfg['shelf_positions'])
-        shelf_idx    = self.target_object_idx // 2
-        target_shelf = np.array(shelf_positions[shelf_idx])
-        dist_to_shelf = np.linalg.norm(husky_xy - target_shelf)
+        reward = 0.0
+        reward -= 0.35 * metrics["dist_to_shelf"]
+        reward -= 0.55 * metrics["dist_to_obj"]
+        reward -= 0.05 * metrics["dist_dropoff"]
+        reward -= 0.01
 
-        # Also check distance to actual object position on shelf
-        obj_pos_check, _ = p.getBasePositionAndOrientation(
-            self.object_ids[self.target_object_idx]
-        )
-        dist_to_shelf = min(dist_to_shelf,
-            np.linalg.norm(husky_xy - np.array(obj_pos_check[:2])))
-
-        gripper_state = p.getLinkState(self.panda_id, 11)
-        gripper_pos   = np.array(gripper_state[0])
-        obj_pos, _    = p.getBasePositionAndOrientation(
-            self.object_ids[self.target_object_idx]
-        )
-        obj_pos      = np.array(obj_pos)
-        dist_to_obj  = np.linalg.norm(gripper_pos - obj_pos)
-
-        # Use current randomized dropoff position
-        current_dropoff = getattr(self, 'current_dropoff',
-                                   self.env_cfg['dropoff_position'])
-        dropoff      = np.array(current_dropoff + [0.1])
-        dist_dropoff = np.linalg.norm(obj_pos - dropoff)
-
-        # Continuous shaping
-        reward = -0.3 * dist_to_shelf - 0.4 * dist_to_obj - 0.3 * dist_dropoff
-
-        # Phase bonuses — one time only
-        if not self.reached_shelf and dist_to_shelf < 2.0:
-            self.reached_shelf = True
-            reward += 1.0
-            self.phase_bonuses += 1.0
-
-        if not self.reached_object and dist_to_obj < 0.25:
-            self.reached_object = True
+        if metrics["dist_to_shelf"] < 1.2:
             reward += 2.0
-            self.phase_bonuses += 2.0
-
-        if not self.grasped_object and dist_to_obj < 0.08:
-            self.grasped_object = True
+        if metrics["dist_to_obj"] < 0.30:
             reward += 3.0
-            self.phase_bonuses += 3.0
-
-        if not self.delivered_object and dist_dropoff < 0.3:
-            self.delivered_object = True
+        if metrics["dist_to_obj"] < 0.18:
             reward += 5.0
-            self.phase_bonuses += 5.0
+        if metrics["dist_to_obj"] < 0.10 and metrics["gripper_closed"]:
+            reward += 8.0
+        if metrics["attached"]:
+            reward += 15.0
+        if metrics["obj_z"] > 0.70:
+            reward += 20.0
+        if metrics["obj_speed"] > 2.5:
+            reward -= 6.0
+        if metrics["obj_z"] > 0.75 and not metrics["attached"]:
+            reward -= 10.0
 
         return reward
+
+    def _release_grasp_constraint(self):
+        if self.grasp_constraint is not None:
+            try:
+                p.removeConstraint(self.grasp_constraint)
+            except Exception:
+                pass
+            self.grasp_constraint = None
+
+    def get_target_metrics(self):
+        husky_pos, _ = p.getBasePositionAndOrientation(self.husky_id)
+        husky_xy = np.array(husky_pos[:2])
+        shelf_positions = getattr(self, 'current_shelf_positions',
+                                  self.env_cfg['shelf_positions'])
+        shelf_idx = self.target_object_idx // 2
+        target_shelf = np.array(shelf_positions[shelf_idx])
+
+        gripper_pos = np.array(p.getLinkState(self.panda_id, 11)[0])
+        obj_pos, _ = p.getBasePositionAndOrientation(
+            self.object_ids[self.target_object_idx]
+        )
+        obj_pos = np.array(obj_pos)
+        obj_vel, _ = p.getBaseVelocity(self.object_ids[self.target_object_idx])
+        obj_speed = np.linalg.norm(obj_vel)
+        current_dropoff = getattr(self, 'current_dropoff',
+                                  self.env_cfg['dropoff_position'])
+        dropoff = np.array(current_dropoff + [0.05])
+        gripper_opening = p.getJointState(self.panda_id, 9)[0]
+
+        return {
+            "husky_xy": husky_xy,
+            "target_shelf": target_shelf,
+            "gripper_pos": gripper_pos,
+            "obj_pos": obj_pos,
+            "obj_z": float(obj_pos[2]),
+            "obj_speed": float(obj_speed),
+            "dist_to_shelf": float(np.linalg.norm(husky_xy - target_shelf)),
+            "dist_to_obj": float(np.linalg.norm(gripper_pos - obj_pos)),
+            "dist_dropoff": float(np.linalg.norm(obj_pos - dropoff)),
+            "gripper_closed": bool(gripper_opening < 0.02),
+            "attached": bool(self.grasp_constraint is not None),
+        }
+
+    def _update_task_status(self):
+        metrics = self.get_target_metrics()
+
+        if not metrics["gripper_closed"]:
+            self._release_grasp_constraint()
+            metrics["attached"] = False
+
+        if self.grasp_constraint is None:
+            should_attach = (
+                metrics["dist_to_obj"] < 0.10 and
+                metrics["gripper_closed"] and
+                metrics["obj_z"] < 0.72 and
+                metrics["obj_speed"] < 1.5
+            )
+            if should_attach:
+                target_id = self.object_ids[self.target_object_idx]
+                self.grasp_constraint = p.createConstraint(
+                    self.panda_id, 11,
+                    target_id, -1,
+                    p.JOINT_FIXED,
+                    [0, 0, 0],
+                    [0, 0, 0.04],
+                    [0, 0, 0]
+                )
+                p.changeConstraint(self.grasp_constraint, maxForce=300)
+                metrics["attached"] = True
+
+        metrics["attached"] = bool(self.grasp_constraint is not None)
+
+        if not self.reached_shelf and metrics["dist_to_shelf"] < 1.5:
+            self.reached_shelf = True
+            self.phase_bonuses += 2.0
+        if not self.reached_object and metrics["dist_to_obj"] < 0.25:
+            self.reached_object = True
+            self.phase_bonuses += 4.0
+        if not self.grasped_object and metrics["attached"]:
+            self.grasped_object = True
+            self.phase_bonuses += 8.0
+        if not self.lifted_object and metrics["attached"] and metrics["obj_z"] > 0.72:
+            self.lifted_object = True
+            self.phase_bonuses += 20.0
+        if not self.delivered_object and metrics["attached"] and metrics["dist_dropoff"] < 0.5:
+            self.delivered_object = True
+            self.phase_bonuses += 30.0
+
+        metrics["success"] = self.lifted_object
+        return metrics
 
     def _get_curriculum_start(self):
         """Return robot start position based on curriculum stage"""
@@ -270,7 +328,9 @@ class MobileWarehouseEnvV2:
         self.reached_object   = False
         self.grasped_object   = False
         self.delivered_object = False
+        self.lifted_object    = False
         self.phase_bonuses    = 0.0
+        self._release_grasp_constraint()
 
         # Randomize shelf positions every episode
         sx = np.random.uniform(1.5, 3.5)
@@ -289,10 +349,10 @@ class MobileWarehouseEnvV2:
         # Pick target object
         self.target_object_idx = np.random.randint(0, self.env_cfg['num_objects'])
 
-        # Random robot start anywhere in center zone
-        start_x = np.random.uniform(-1.0, 1.0)
-        start_y = np.random.uniform(-1.0, 1.0)
-        start_yaw = np.random.uniform(0, 2*np.pi)
+        # Curriculum-aware robot start
+        start_x, start_y, _ = self._get_curriculum_start()
+        target_shelf = np.array(self.current_shelf_positions[self.target_object_idx // 2])
+        start_yaw = float(np.arctan2(target_shelf[1] - start_y, target_shelf[0] - start_x))
         p.resetBasePositionAndOrientation(
             self.husky_id,
             [start_x, start_y, 0.15],
@@ -322,6 +382,7 @@ class MobileWarehouseEnvV2:
                      base_positions[i][1]+noise[1],
                      base_positions[i][2]]
             p.resetBasePositionAndOrientation(obj_id, pos, [0,0,0,1])
+            p.resetBaseVelocity(obj_id, [0,0,0], [0,0,0])
 
         # Pick instruction that matches target object color
         color_instructions = {
@@ -389,16 +450,26 @@ class MobileWarehouseEnvV2:
         self.step_count += 1
 
         obs    = self.get_camera_image()
-        reward = self.compute_reward()
-        done   = self.step_count >= self.env_cfg['max_episode_steps']
+        reward = self.compute_reward() + self.phase_bonuses
+        phase_bonus = self.phase_bonuses
+        self.phase_bonuses = 0.0
+        metrics = self._update_task_status()
+        done   = metrics["success"] or self.step_count >= self.env_cfg['max_episode_steps']
 
         return obs, reward, done, {
             'instruction':    self.current_instruction,
-            'phase_bonuses':  self.phase_bonuses,
+            'phase_bonuses':  phase_bonus,
             'reached_shelf':  self.reached_shelf,
             'reached_object': self.reached_object,
             'grasped':        self.grasped_object,
-            'delivered':      self.delivered_object
+            'lifted':         self.lifted_object,
+            'delivered':      self.delivered_object,
+            'attached':       metrics["attached"],
+            'dist_to_shelf':  metrics["dist_to_shelf"],
+            'dist_to_obj':    metrics["dist_to_obj"],
+            'dist_dropoff':   metrics["dist_dropoff"],
+            'obj_z':          metrics["obj_z"],
+            'success':        metrics["success"],
         }
 
     def initialize(self):

@@ -1,27 +1,39 @@
 """
-Phase 1 State-based RL — Fixed Panda arm pick-and-lift.
-No image rendering — trains in minutes.
+Phase 1 state-based RL with expert-guided warm start and deterministic eval.
+
+Why this exists:
+- Pure RL from scratch collapsed into a low-motion local minimum.
+- Old vision BC was not a good control prior.
+- The fastest path to a presentable pick-and-lift demo is:
+  1. learn a clean state policy from the working IK expert,
+  2. fine-tune with PPO in the real environment,
+  3. choose checkpoints by deterministic eval, not sampled rollout luck.
 """
-import sys, os, torch, torch.nn as nn, numpy as np, time
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-import pybullet as p
-from src.env.warehouse_env import WarehouseEnv
+import os
+import sys
+import time
 from collections import deque
+
+import numpy as np
+import pybullet as p
+import torch
+import torch.nn as nn
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from src.data.collect_demos import IKExpertController
+from src.env.warehouse_env import WarehouseEnv
 
 
 class StatePolicy(nn.Module):
     def __init__(self, state_dim=15, action_dim=7):
-        """
-        State: gripper_pos(3) + target_obj_pos(3) + joint_angles(7) + gripper_opening(1) + dist(1) = 15
-        Only sees the TARGET object — no confusion about which to grasp.
-        """
         super().__init__()
         self.actor_mean = nn.Sequential(
             nn.Linear(state_dim, 256), nn.ReLU(),
             nn.Linear(256, 256), nn.ReLU(),
             nn.Linear(256, action_dim)
         )
-        self.actor_log_std = nn.Parameter(torch.zeros(action_dim))
+        self.actor_log_std = nn.Parameter(torch.zeros(action_dim) - 2.6)
         self.critic = nn.Sequential(
             nn.Linear(state_dim, 256), nn.ReLU(),
             nn.Linear(256, 256), nn.ReLU(),
@@ -29,82 +41,210 @@ class StatePolicy(nn.Module):
         )
 
     def get_state(self, env):
-        gripper = np.array(p.getLinkState(env.robot_id, 11)[0])
-        target_id = env.object_ids[getattr(env, '_target_idx', 0)]
+        gripper = np.array(p.getLinkState(env.robot_id, 11)[0], dtype=np.float32)
+        target_id = env.object_ids[getattr(env, "_target_idx", 0)]
         target_pos, _ = p.getBasePositionAndOrientation(target_id)
-        target_pos = np.array(target_pos)
-        joints = [p.getJointState(env.robot_id, j)[0] for j in range(7)]
-        gripper_opening = p.getJointState(env.robot_id, 9)[0]
-        dist = np.linalg.norm(gripper - target_pos)
+        target_pos = np.array(target_pos, dtype=np.float32)
+        joints = np.array([p.getJointState(env.robot_id, j)[0] for j in range(7)], dtype=np.float32)
+        gripper_opening = np.float32(p.getJointState(env.robot_id, 9)[0])
+        dist = np.float32(np.linalg.norm(gripper - target_pos))
         return np.concatenate([gripper, target_pos, joints, [gripper_opening, dist]]).astype(np.float32)
 
     def forward(self, state, action=None):
         mean = self.actor_mean(state)
-        std = self.actor_log_std.exp().clamp(min=0.05)
+        std = self.actor_log_std.exp().clamp(min=0.01, max=0.05)
         dist = torch.distributions.Normal(mean, std)
         if action is None:
             action = dist.sample()
-        return (action, dist.log_prob(action).sum(-1),
-                dist.entropy().sum(-1), self.critic(state).squeeze(-1))
+        return (
+            action,
+            dist.log_prob(action).sum(-1),
+            dist.entropy().sum(-1),
+            self.critic(state).squeeze(-1),
+        )
+
+
+def collect_expert_dataset(policy, env, num_demos=200, steps_per_demo=110):
+    expert = IKExpertController(env.robot_id)
+    states = []
+    actions = []
+
+    print(f"Collecting {num_demos} expert rollouts for warm start...", flush=True)
+    for _ in range(num_demos):
+        env.reset()
+        target_id = env.object_ids[getattr(env, "_target_idx", 0)]
+        target_pos, _ = p.getBasePositionAndOrientation(target_id)
+        expert.reset(target_pos)
+
+        for _ in range(steps_per_demo):
+            states.append(policy.get_state(env))
+            action = expert.get_action().astype(np.float32)
+            actions.append(action)
+            env.step(action)
+
+    states_t = torch.FloatTensor(np.array(states, dtype=np.float32))
+    actions_t = torch.FloatTensor(np.array(actions, dtype=np.float32))
+    return states_t, actions_t
+
+
+def pretrain_actor(policy, expert_states, expert_actions, epochs=10, batch_size=256):
+    optimizer = torch.optim.Adam(policy.actor_mean.parameters(), lr=1e-3)
+    num_samples = expert_states.shape[0]
+    print(f"Pretraining actor on {num_samples:,} expert state-action pairs...", flush=True)
+
+    for epoch in range(epochs):
+        perm = torch.randperm(num_samples)
+        losses = []
+        for start in range(0, num_samples, batch_size):
+            idx = perm[start:start + batch_size]
+            pred = policy.actor_mean(expert_states[idx])
+            joint_loss = nn.MSELoss()(pred[:, :6], expert_actions[idx][:, :6])
+            gripper_loss = nn.MSELoss()(pred[:, 6:], expert_actions[idx][:, 6:])
+            loss = joint_loss + 5.0 * gripper_loss
+            optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(policy.actor_mean.parameters(), 1.0)
+            optimizer.step()
+            losses.append(loss.item())
+        print(f"  Warm start epoch {epoch + 1}/{epochs} | actor_loss={np.mean(losses):.4f}", flush=True)
+
+
+def apply_curriculum_reset(env, episode):
+    """
+    Start easy and gradually reintroduce randomness.
+    The task is still pick-and-lift, but the policy first learns the basic
+    motion pattern before dealing with larger pose variation.
+    """
+    env.reset()
+
+    if episode < 2000:
+        noise_scale = 0.005
+    elif episode < 6000:
+        noise_scale = 0.02
+    elif episode < 12000:
+        noise_scale = 0.035
+    else:
+        return
+
+    for i, obj_id in enumerate(env.object_ids):
+        noise = np.random.uniform(-noise_scale, noise_scale, 2)
+        base_pos = [0.5 + noise[0], (i - 1) * 0.3 + noise[1], 0.05]
+        p.resetBasePositionAndOrientation(obj_id, base_pos, [0, 0, 0, 1])
+        p.resetBaseVelocity(obj_id, [0, 0, 0], [0, 0, 0])
+
+
+def rollout_step(env, action_np):
+    env.apply_action(action_np)
+    p.stepSimulation()
+    env.step_count += 1
+
+    reward = env.compute_reward()
+    success, metrics = env.update_success_state()
+    done = success or env.step_count >= env.env_cfg["max_episode_steps"]
+
+    if success:
+        reward += 120.0
+    elif done and metrics["obj_z"] > 0.07:
+        reward += 15.0
+
+    return reward, done, success, metrics
+
+
+def evaluate_policy(policy, env, episodes=20):
+    policy.eval()
+    rewards = []
+    successes = 0
+    max_zs = []
+    deltas = []
+
+    with torch.no_grad():
+        for _ in range(episodes):
+            env.reset()
+            state = policy.get_state(env)
+            ep_reward = 0.0
+            max_z = 0.0
+            prev_action = None
+
+            for _ in range(env.env_cfg["max_episode_steps"]):
+                st = torch.FloatTensor(state).unsqueeze(0)
+                action_np = policy.actor_mean(st).squeeze().cpu().numpy()
+                reward, done, success, metrics = rollout_step(env, action_np)
+                ep_reward += reward
+                max_z = max(max_z, metrics["obj_z"])
+                if prev_action is not None:
+                    deltas.append(float(np.linalg.norm(action_np[:6] - prev_action[:6])))
+                prev_action = action_np
+                state = policy.get_state(env)
+                if done:
+                    if success:
+                        successes += 1
+                    break
+
+            rewards.append(ep_reward)
+            max_zs.append(max_z)
+
+    return {
+        "success_rate": 100.0 * successes / max(episodes, 1),
+        "mean_reward": float(np.mean(rewards)) if rewards else 0.0,
+        "mean_max_z": float(np.mean(max_zs)) if max_zs else 0.0,
+        "mean_action_delta": float(np.mean(deltas)) if deltas else 0.0,
+    }
 
 
 if __name__ == "__main__":
     NUM_EPISODES = 100000
-    MAX_STEPS = 300
+    MAX_STEPS = 180
+    EVAL_INTERVAL = 250
+    EVAL_EPISODES = 20
+    PPO_EPOCHS = 4
+    LR = 1e-4
+    ENT_COEF = 0.0002
+    BC_ANCHOR_COEF = 0.10
 
     print(f"Phase 1 State RL — {NUM_EPISODES} episodes", flush=True)
 
     policy = StatePolicy()
-    optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=LR)
     print(f"Params: {sum(pp.numel() for pp in policy.parameters()):,}", flush=True)
 
     env = WarehouseEnv(render=False)
     env.initialize()
+    env.env_cfg["max_episode_steps"] = MAX_STEPS
+
+    pretrain_ckpt = "checkpoints/phase1_state_bc_init.pth"
+    if os.path.exists(pretrain_ckpt):
+        policy.load_state_dict(torch.load(pretrain_ckpt, map_location="cpu", weights_only=True))
+        print(f"Loaded warm-start state policy from {pretrain_ckpt}", flush=True)
+        expert_states, expert_actions = collect_expert_dataset(policy, env, num_demos=120, steps_per_demo=110)
+    else:
+        expert_states, expert_actions = collect_expert_dataset(policy, env, num_demos=200, steps_per_demo=110)
+        pretrain_actor(policy, expert_states, expert_actions, epochs=12)
+        torch.save(policy.state_dict(), pretrain_ckpt)
+        print(f"Saved warm-start state policy to {pretrain_ckpt}", flush=True)
 
     episode_rewards = deque(maxlen=200)
     successes = deque(maxlen=200)
-    best_success_rate = 0
     total_successes = 0
+    best_train_success = 0.0
+    best_eval_success = -1.0
+    best_eval_reward = -float("inf")
     start = time.time()
 
     os.makedirs("checkpoints", exist_ok=True)
 
     for episode in range(NUM_EPISODES):
-        # Reset without camera
-        env.step_count = 0
-        home = [0, -0.785, 0, -2.356, 0, 1.571, 0.785]
-        for i, pos in enumerate(home):
-            p.resetJointState(env.robot_id, i, pos)
-        for i, obj_id in enumerate(env.object_ids):
-            noise = np.random.uniform(-0.05, 0.05, 2)
-            p.resetBasePositionAndOrientation(
-                obj_id, [0.5+noise[0], (i-1)*0.3+noise[1], 0.05], [0,0,0,1])
-        env._near_object = False
-        env._grasped = False
-        env._lift_count = 0
-
+        apply_curriculum_reset(env, episode)
         state = policy.get_state(env)
         states_b, actions_b, lps_b, rewards_b, values_b = [], [], [], [], []
-        ep_reward = 0
+        ep_reward = 0.0
+        success = False
 
-        for step in range(MAX_STEPS):
+        for _ in range(MAX_STEPS):
             st = torch.FloatTensor(state).unsqueeze(0)
             with torch.no_grad():
                 action, lp, _, val = policy(st)
-            a_np = action.squeeze().numpy()
-
-            env.apply_action(a_np)
-            p.stepSimulation()
-            env.step_count += 1
-            reward = env.compute_reward()
-            if env._grasped:
-                env._lift_count += 1
-            else:
-                env._lift_count = 0
-            success = env._lift_count >= 15
-            done = success or env.step_count >= MAX_STEPS
-            if success:
-                reward += 50.0
+            action_np = action.squeeze().cpu().numpy()
+            reward, done, success, _ = rollout_step(env, action_np)
 
             states_b.append(st.squeeze())
             actions_b.append(action.squeeze())
@@ -113,6 +253,7 @@ if __name__ == "__main__":
             values_b.append(val.squeeze())
             ep_reward += reward
             state = policy.get_state(env)
+
             if done:
                 break
 
@@ -121,48 +262,93 @@ if __name__ == "__main__":
         episode_rewards.append(ep_reward)
         successes.append(1 if success else 0)
 
-        # PPO update
-        R = torch.FloatTensor(rewards_b)
-        V = torch.stack(values_b)
-        adv = torch.zeros_like(R)
-        lg = 0
-        for t in reversed(range(len(R))):
-            nv = V[t+1] if t < len(R)-1 else torch.tensor(0.0)
-            d = R[t] + 0.99 * nv - V[t]
-            lg = d + 0.99 * 0.95 * lg
-            adv[t] = lg
-        ret = adv + V.detach()
-        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+        rewards_t = torch.FloatTensor(rewards_b)
+        values_t = torch.stack(values_b)
+        advantages = torch.zeros_like(rewards_t)
+        last_gae = 0.0
+        for t in reversed(range(len(rewards_t))):
+            next_value = values_t[t + 1] if t < len(rewards_t) - 1 else torch.tensor(0.0)
+            delta = rewards_t[t] + 0.99 * next_value - values_t[t]
+            last_gae = delta + 0.99 * 0.95 * last_gae
+            advantages[t] = last_gae
+        returns = advantages + values_t.detach()
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         S = torch.stack(states_b)
         A = torch.stack(actions_b)
-        olp = torch.stack(lps_b).detach()
+        old_lp = torch.stack(lps_b).detach()
 
-        for _ in range(4):
-            _, nlp, ent, nv = policy(S, A)
-            ratio = (nlp - olp).exp()
-            pl = -torch.min(adv * ratio, adv * ratio.clamp(0.8, 1.2)).mean()
-            vl = nn.MSELoss()(nv, ret)
-            loss = pl + 0.5 * vl - 0.01 * ent.mean()
+        policy.train()
+        for _ in range(PPO_EPOCHS):
+            _, new_lp, ent, new_values = policy(S, A)
+            ratio = (new_lp - old_lp).exp()
+            pg_loss = -torch.min(
+                advantages * ratio,
+                advantages * ratio.clamp(0.85, 1.15)
+            ).mean()
+            value_loss = nn.MSELoss()(new_values, returns)
+
+            bc_idx = torch.randint(0, expert_states.shape[0], (128,))
+            bc_pred = policy.actor_mean(expert_states[bc_idx])
+            bc_joint = nn.MSELoss()(bc_pred[:, :6], expert_actions[bc_idx][:, :6])
+            bc_gripper = nn.MSELoss()(bc_pred[:, 6:], expert_actions[bc_idx][:, 6:])
+            bc_loss = bc_joint + 5.0 * bc_gripper
+
+            loss = pg_loss + 0.5 * value_loss - ENT_COEF * ent.mean() + BC_ANCHOR_COEF * bc_loss
             optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
             optimizer.step()
 
-        sr = np.mean(successes) * 100
-        if sr > best_success_rate:
-            best_success_rate = sr
-            torch.save(policy.state_dict(),
-                       "checkpoints/phase1_state_policy.pth")
+        train_success = 100.0 * np.mean(successes) if successes else 0.0
+        if train_success > best_train_success:
+            best_train_success = train_success
+            torch.save(policy.state_dict(), "checkpoints/phase1_state_policy.pth")
+
+        if episode > 0 and episode % EVAL_INTERVAL == 0:
+            eval_metrics = evaluate_policy(policy, env, episodes=EVAL_EPISODES)
+            eval_success = eval_metrics["success_rate"]
+            eval_reward = eval_metrics["mean_reward"]
+            print(
+                f"[Eval @ {episode:6d}] "
+                f"Success={eval_success:5.1f}% | "
+                f"Reward={eval_reward:7.1f} | "
+                f"MeanMaxZ={eval_metrics['mean_max_z']:.3f} | "
+                f"MeanDelta={eval_metrics['mean_action_delta']:.3f}",
+                flush=True
+            )
+            better = (
+                eval_success > best_eval_success or
+                (eval_success == best_eval_success and eval_reward > best_eval_reward)
+            )
+            if better:
+                best_eval_success = eval_success
+                best_eval_reward = eval_reward
+                torch.save(policy.state_dict(), "checkpoints/phase1_state_policy_eval_best.pth")
+                print(
+                    f"  ✓ Saved eval-best checkpoint "
+                    f"(success={best_eval_success:.1f}%, reward={best_eval_reward:.1f})",
+                    flush=True
+                )
 
         if episode % 500 == 0:
-            mr = np.mean(episode_rewards)
-            eps = (episode + 1) / (time.time() - start)
-            print(f"Ep {episode:6d} | R: {mr:7.1f} | Success: {sr:5.1f}% | "
-                  f"Best: {best_success_rate:.1f}% | Total: {total_successes} | "
-                  f"{eps:.1f} ep/s", flush=True)
+            mean_reward = np.mean(episode_rewards) if episode_rewards else 0.0
+            eps = (episode + 1) / max(time.time() - start, 1e-6)
+            print(
+                f"Ep {episode:6d} | R: {mean_reward:7.1f} | "
+                f"Success: {train_success:5.1f}% | "
+                f"Best: {best_train_success:.1f}% | "
+                f"EvalBest: {max(best_eval_success, 0.0):.1f}% | "
+                f"Total: {total_successes} | {eps:.1f} ep/s",
+                flush=True
+            )
 
     env.close()
-    elapsed = (time.time() - start) / 60
-    print(f"\nDONE in {elapsed:.1f} min | Best success: {best_success_rate:.1f}% | "
-          f"Total: {total_successes}/{NUM_EPISODES}", flush=True)
+    elapsed = (time.time() - start) / 60.0
+    print(
+        f"\nDONE in {elapsed:.1f} min | "
+        f"Best train success: {best_train_success:.1f}% | "
+        f"Best eval success: {max(best_eval_success, 0.0):.1f}% | "
+        f"Total: {total_successes}/{NUM_EPISODES}",
+        flush=True
+    )

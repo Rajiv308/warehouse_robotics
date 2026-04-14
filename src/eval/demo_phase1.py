@@ -12,9 +12,13 @@ from src.training.train_state_rl_phase1 import StatePolicy
 def run_demo(num_episodes=5, slow_motion=True):
     print("Loading Phase 1 trained policy...", flush=True)
     policy = StatePolicy()
-    ckpt_path = "checkpoints/phase1_state_policy.pth"
-    if not os.path.exists(ckpt_path):
-        print(f"ERROR: {ckpt_path} not found!")
+    candidate_paths = [
+        "checkpoints/phase1_state_policy_eval_best.pth",
+        "checkpoints/phase1_state_policy.pth",
+    ]
+    ckpt_path = next((path for path in candidate_paths if os.path.exists(path)), None)
+    if ckpt_path is None:
+        print("ERROR: no Phase 1 state checkpoint found!")
         return
     policy.load_state_dict(torch.load(ckpt_path, map_location='cpu', weights_only=True))
     policy.eval()
@@ -44,20 +48,14 @@ def run_demo(num_episodes=5, slow_motion=True):
         for step in range(300):
             state_t = torch.FloatTensor(state).unsqueeze(0)
             with torch.no_grad():
-                action, _, _, _ = policy(state_t)
-            action_np = action.squeeze().numpy()
+                action_np = policy.actor_mean(state_t).squeeze().numpy()
 
             env.apply_action(action_np)
             p.stepSimulation()
             env.step_count += 1
             reward = env.compute_reward()
 
-            if env._grasped:
-                env._lift_count = getattr(env, '_lift_count', 0) + 1
-            else:
-                env._lift_count = 0
-
-            success = env._lift_count >= 15
+            success, _ = env.update_success_state()
             ep_reward += reward
             state = policy.get_state(env)
 
