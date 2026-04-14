@@ -149,43 +149,57 @@ def compute_reward(husky, panda, box_id, shelf_pos, dropoff_pos):
     robot_xy = np.array(base_pos[:2])
     gripper_pos = np.array(p.getLinkState(panda, 11)[0])
     obj_pos = np.array(p.getBasePositionAndOrientation(box_id)[0])
+    obj_vel, _ = p.getBaseVelocity(box_id)
+    obj_speed = np.linalg.norm(obj_vel)
 
     ds = np.linalg.norm(robot_xy - np.array(shelf_pos))
     do = np.linalg.norm(gripper_pos - obj_pos)
     dd = np.linalg.norm(obj_pos[:2] - np.array(dropoff_pos))
+    gripper_opening = p.getJointState(panda, 9)[0]
+    gripper_closed = gripper_opening < 0.02
 
-    # Dense approach rewards
-    reward = -0.3 * ds - 0.5 * do - 0.2 * dd
+    # Dense approach
+    reward = -0.3 * ds - 0.4 * do - 0.2 * dd
 
     # Navigation milestones
     if ds < 1.5: reward += 1.0
-    if ds < 0.8: reward += 2.0
+    if ds < 0.8: reward += 3.0
 
     # Reaching milestones
-    if do < 0.3: reward += 3.0
+    if do < 0.3: reward += 2.0
     if do < 0.15: reward += 5.0
     if do < 0.08: reward += 8.0
 
-    # Gripper close incentive — close when near object
-    gripper_joint = p.getJointState(panda, 9)[0]
-    if do < 0.15 and gripper_joint < 0.02:
-        reward += 10.0  # TRY to grasp when close
+    # Gripper OPEN during approach
+    if do > 0.10 and not gripper_closed:
+        reward += 0.5
 
-    # Object lifted (starts at z=0.58 on shelf)
-    if obj_pos[2] > 0.62: reward += 15.0   # barely lifted
-    if obj_pos[2] > 0.70: reward += 25.0   # clearly lifted
-    if obj_pos[2] > 0.80: reward += 40.0   # high lift
+    # Gripper CLOSE when very near
+    if do < 0.08 and gripper_closed:
+        reward += 10.0
 
-    # Carrying toward dropoff
-    if obj_pos[2] > 0.3 and dd < 2.0: reward += 20.0
-    if obj_pos[2] > 0.3 and dd < 1.0: reward += 50.0
-    if obj_pos[2] > 0.1 and dd < 0.5: reward += 100.0  # delivered!
+    # ACTUAL GRASP — object near gripper + lifted + closed + not flung
+    object_held = (do < 0.10 and obj_pos[2] > 0.62 and gripper_closed and obj_speed < 1.5)
+    if object_held:
+        reward += 30.0
+        reward += obj_pos[2] * 20.0  # higher = better
+
+        # Carrying toward dropoff while holding
+        if dd < 2.0: reward += 20.0
+        if dd < 1.0: reward += 50.0
+        if dd < 0.5: reward += 100.0  # delivery!
+
+    # Anti-fling: object airborne but far from gripper
+    if obj_pos[2] > 0.65 and do > 0.15:
+        reward -= 10.0
+    if obj_speed > 3.0:
+        reward -= 5.0
 
     return reward, ds, do, dd
 
 
 if __name__ == "__main__":
-    NUM_EPISODES = 50000  # Train to perfection
+    NUM_EPISODES = 100000  # Train to perfection
     MAX_STEPS = 500
 
     print("Phase 2 State RL — WHEEL PHYSICS — 50K episodes", flush=True)

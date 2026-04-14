@@ -10,7 +10,11 @@ from collections import deque
 
 
 class StatePolicy(nn.Module):
-    def __init__(self, state_dim=19, action_dim=7):
+    def __init__(self, state_dim=15, action_dim=7):
+        """
+        State: gripper_pos(3) + target_obj_pos(3) + joint_angles(7) + gripper_opening(1) + dist(1) = 15
+        Only sees the TARGET object — no confusion about which to grasp.
+        """
         super().__init__()
         self.actor_mean = nn.Sequential(
             nn.Linear(state_dim, 256), nn.ReLU(),
@@ -26,12 +30,13 @@ class StatePolicy(nn.Module):
 
     def get_state(self, env):
         gripper = np.array(p.getLinkState(env.robot_id, 11)[0])
-        objs = []
-        for oid in env.object_ids:
-            pos, _ = p.getBasePositionAndOrientation(oid)
-            objs.extend(pos)
+        target_id = env.object_ids[getattr(env, '_target_idx', 0)]
+        target_pos, _ = p.getBasePositionAndOrientation(target_id)
+        target_pos = np.array(target_pos)
         joints = [p.getJointState(env.robot_id, j)[0] for j in range(7)]
-        return np.concatenate([gripper, objs, joints]).astype(np.float32)
+        gripper_opening = p.getJointState(env.robot_id, 9)[0]
+        dist = np.linalg.norm(gripper - target_pos)
+        return np.concatenate([gripper, target_pos, joints, [gripper_opening, dist]]).astype(np.float32)
 
     def forward(self, state, action=None):
         mean = self.actor_mean(state)
@@ -44,7 +49,7 @@ class StatePolicy(nn.Module):
 
 
 if __name__ == "__main__":
-    NUM_EPISODES = 50000
+    NUM_EPISODES = 100000
     MAX_STEPS = 300
 
     print(f"Phase 1 State RL — {NUM_EPISODES} episodes", flush=True)
@@ -96,7 +101,7 @@ if __name__ == "__main__":
                 env._lift_count += 1
             else:
                 env._lift_count = 0
-            success = env._lift_count >= 5
+            success = env._lift_count >= 15
             done = success or env.step_count >= MAX_STEPS
             if success:
                 reward += 50.0

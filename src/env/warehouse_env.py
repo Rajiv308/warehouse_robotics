@@ -179,56 +179,64 @@ class WarehouseEnv:
                                      targetPosition=gripper_pos, force=10)
 
     def compute_reward(self):
-        """Dense reward with smooth grasp incentives."""
+        """Reward for deliberate grasping — not flinging."""
         gripper_state = p.getLinkState(self.robot_id, 11)
         gripper_pos = np.array(gripper_state[0])
 
-        # Find closest object
-        min_dist = float('inf')
-        closest_obj_pos = None
-        for obj_id in self.object_ids:
-            obj_pos, _ = p.getBasePositionAndOrientation(obj_id)
-            dist = np.linalg.norm(gripper_pos - np.array(obj_pos))
-            if dist < min_dist:
-                min_dist = dist
-                closest_obj_pos = np.array(obj_pos)
+        # Target object (set during reset)
+        target_id = self.object_ids[getattr(self, '_target_idx', 0)]
+        obj_pos, _ = p.getBasePositionAndOrientation(target_id)
+        obj_pos = np.array(obj_pos)
+        obj_vel, _ = p.getBaseVelocity(target_id)
+        obj_speed = np.linalg.norm(obj_vel)
+
+        dist = np.linalg.norm(gripper_pos - obj_pos)
+        obj_z = obj_pos[2]
+        gripper_opening = p.getJointState(self.robot_id, 9)[0]  # 0=closed, 0.04=open
+        gripper_closed = gripper_opening < 0.02
 
         reward = 0.0
 
-        # 1. Approach — dense, always active
-        reward += -min_dist * 2.0
+        # 1. Approach target — dense
+        reward -= dist * 2.0
 
-        # 2. Proximity bonuses — graduated
-        if min_dist < 0.15:
-            reward += 2.0
-        if min_dist < 0.08:
-            reward += 5.0
-            self._near_object = True
-        else:
-            self._near_object = False
+        # 2. Proximity milestones
+        if dist < 0.15: reward += 1.0
+        if dist < 0.08: reward += 3.0
+        if dist < 0.05: reward += 5.0
 
-        # 3. Gripper close incentive — reward closing when near object
-        gripper_joint = p.getJointState(self.robot_id, 9)[0]  # 0=closed, 0.04=open
-        if min_dist < 0.10 and gripper_joint < 0.02:
-            reward += 8.0  # strong signal: "close gripper when near"
+        # 3. Gripper OPEN during approach (so it can wrap around object)
+        if dist > 0.08 and not gripper_closed:
+            reward += 1.0  # keep open while approaching
 
-        # 4. Object movement — graduated, starts at z > 0.06 (barely moved)
-        obj_z = closest_obj_pos[2] if closest_obj_pos is not None else 0
-        if obj_z > 0.06:
-            reward += 10.0
+        # 4. Gripper CLOSE when very close (actual grasp attempt)
+        if dist < 0.06 and gripper_closed:
+            reward += 8.0
+
+        # 5. REAL grasp: object near gripper + lifted + gripper closed + object NOT flying
+        self._grasped = False
+        self._near_object = dist < 0.08
+        if dist < 0.08 and obj_z > 0.08 and gripper_closed and obj_speed < 1.0:
             self._grasped = True
-        else:
-            self._grasped = False
-        if obj_z > 0.08:
-            reward += 20.0
-        if obj_z > 0.12:
             reward += 30.0
+            reward += obj_z * 40.0  # lift higher = better
 
-        # 5. Continuous lift reward
-        if self._grasped:
-            reward += obj_z * 50.0
+        # 6. Penalty for violence — object moving fast means flinging not grasping
+        if obj_speed > 2.0:
+            reward -= 10.0
+        if obj_z > 0.10 and dist > 0.15:
+            reward -= 10.0  # object airborne but far from gripper = fling
 
-        # 6. Time penalty
+        # 7. Smooth motion bonus — penalize jerky actions
+        if hasattr(self, '_prev_action'):
+            action_delta = np.linalg.norm(
+                np.array(self._current_action[:6]) - np.array(self._prev_action[:6]))
+            if action_delta < 0.3:
+                reward += 0.5  # smooth motion bonus
+            elif action_delta > 1.5:
+                reward -= 1.0  # jerk penalty
+
+        # 8. Time penalty
         reward -= 0.01
 
         return reward
@@ -252,14 +260,20 @@ class WarehouseEnv:
         self._near_object = False
         self._grasped = False
         self._lift_count = 0
+        self._prev_action = None
+        self._current_action = None
 
-        # Pick a random instruction
-        self.current_instruction = np.random.choice(self.task_instructions)
+        # Pick a specific target object
+        self._target_idx = np.random.randint(0, len(self.object_ids))
+        color_names = ["red", "blue", "green"]
+        self.current_instruction = f"pick up the {color_names[self._target_idx]} box"
 
         return self.get_camera_image(), self.current_instruction
 
     def step(self, action):
         """Run one simulation step"""
+        self._prev_action = self._current_action
+        self._current_action = action
         self.apply_action(action)
         p.stepSimulation()
         self.step_count += 1
@@ -275,7 +289,7 @@ class WarehouseEnv:
         else:
             self._lift_count = 0
 
-        success = self._lift_count >= 5
+        success = self._lift_count >= 15  # must hold for 15 steps (not just a momentary fling)
         done = success or self.step_count >= self.env_cfg['max_episode_steps']
 
         if success:
