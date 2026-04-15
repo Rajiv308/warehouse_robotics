@@ -291,7 +291,7 @@ class MobileWarehouseEnvV2:
             self.delivered_object = True
             self.phase_bonuses += 30.0
 
-        metrics["success"] = self.lifted_object
+        metrics["success"] = self.delivered_object
         return metrics
 
     def _get_curriculum_start(self):
@@ -423,6 +423,19 @@ class MobileWarehouseEnvV2:
         return self.current_instruction
 
     def step(self, action):
+        # ===== ACTION SCALING FIX =====
+        action = np.array(action).copy()
+
+        # Navigation (keep small)
+        action[0] *= 1.0   # forward velocity scale (you already multiply by 0.05 later)
+        action[2] *= 1.0   # angular velocity scale
+
+        # Arm joints (CRITICAL — expand range)
+        action[3:9] *= 2.5   # allows joints to move beyond [-1,1]
+
+        # Gripper (binary)
+        action[9] = 1.0 if action[9] > 0 else 0.0
+        # =============================
         # Navigation
         # Move Husky directly via position update (avoids constraint instability)
         vx = float(action[0]) * 0.05   # meters per step

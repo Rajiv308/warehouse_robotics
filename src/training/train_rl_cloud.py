@@ -156,18 +156,17 @@ def denormalize_action(norm_action, action_min, action_range):
     return action_min + (norm_action + 1.0) * 0.5 * action_range
 
 
-def compute_shaped_reward(env, prev_dist_to_shelf, prev_dist_to_obj):
+def compute_shaped_reward(env, prev_dist_to_shelf, prev_dist_to_obj, prev_dist_dropoff):
     """
-    Dense reward shaping for full task:
+    Delivery-aware reward shaping:
     1. Progress toward shelf
     2. Progress toward object
-    3. Progress toward dropoff
-    Plus phase bonuses
+    3. Progress toward dropoff after grasp/lift
+    4. Sparse bonuses for grasp, lift, delivery
     """
     husky_pos, _ = p.getBasePositionAndOrientation(env.husky_id)
     husky_xy     = np.array(husky_pos[:2])
 
-    # Use dynamic randomized positions, not static config
     shelf_positions = getattr(env, 'current_shelf_positions',
                               env.env_cfg['shelf_positions'])
     shelf_idx    = env.target_object_idx // 2
@@ -184,26 +183,36 @@ def compute_shaped_reward(env, prev_dist_to_shelf, prev_dist_to_obj):
 
     current_dropoff = getattr(env, 'current_dropoff',
                               env.env_cfg['dropoff_position'])
-    dropoff      = np.array(current_dropoff + [0.1])
-    dist_dropoff = np.linalg.norm(obj_pos - dropoff)
+    dropoff_xy   = np.array(current_dropoff[:2])
+    dist_dropoff = np.linalg.norm(obj_pos[:2] - dropoff_xy)
 
-    # Progress rewards (positive when getting closer)
-    shelf_progress = prev_dist_to_shelf - dist_to_shelf
-    obj_progress   = prev_dist_to_obj   - dist_to_obj
+    reward = 0.0
 
-    reward = (
-        2.0 * shelf_progress +   # navigate to shelf
-        3.0 * obj_progress   +   # reach object
-        -0.1 * dist_dropoff      # delivery shaping
-    )
+    # Stage 1: navigation to shelf
+    reward += 2.0 * (prev_dist_to_shelf - dist_to_shelf)
+    if env.reached_shelf:
+        reward += 5.0
 
-    # Phase bonuses
-    if dist_to_shelf < 1.2:  reward += 0.5
-    if dist_to_obj   < 0.2:  reward += 1.0
-    if dist_to_obj   < 0.1:  reward += 2.0
-    if dist_dropoff  < 0.3:  reward += 5.0
+    # Stage 2: approach/grasp object
+    reward += 3.0 * (prev_dist_to_obj - dist_to_obj)
+    if env.grasped_object:
+        reward += 20.0
 
-    return reward, dist_to_shelf, dist_to_obj
+    # Stage 3: lift
+    if env.lifted_object:
+        reward += 40.0
+
+    # Stage 4: delivery progress only after grasp/lift
+    if env.grasped_object or env.lifted_object or env.delivered_object:
+        reward += 4.0 * (prev_dist_dropoff - dist_dropoff)
+
+    if env.delivered_object:
+        reward += 100.0
+
+    if env.delivered_object:
+        reward += 150.0
+
+    return reward, dist_to_shelf, dist_to_obj, dist_dropoff
 
 
 def train_cloud_ppo(config_path="configs/config_cloud.yaml"):
@@ -218,7 +227,7 @@ def train_cloud_ppo(config_path="configs/config_cloud.yaml"):
 
     # PPO hyperparameters - optimized for cloud
     num_episodes      = tc['rl_episodes']      # 2000
-    steps_per_rollout = 512                     # larger rollouts
+    steps_per_rollout = 128                     # reduced rollouts
     ppo_epochs        = 6                       # more updates per rollout
     clip_epsilon      = 0.2
     gamma             = tc['gamma']
@@ -291,7 +300,15 @@ def train_cloud_ppo(config_path="configs/config_cloud.yaml"):
     best_mean_reward = -float('inf')
 
     obs, instruction = env.reset()
-    robot_state      = get_robot_state(env)
+    phase = 0
+    if env.reached_shelf:
+        phase = 1
+    if env.grasped_object:
+        phase = 2
+    if env.lifted_object:
+        phase = 3
+
+    robot_state = np.concatenate([get_robot_state(env), [phase]])
     episode_reward   = 0
     episode_length   = 0
     total_episodes   = 0
@@ -308,6 +325,8 @@ def train_cloud_ppo(config_path="configs/config_cloud.yaml"):
     gripper_state = p.getLinkState(env.panda_id, 11)
     obj_pos, _ = p.getBasePositionAndOrientation(env.object_ids[env.target_object_idx])
     prev_dist_obj = np.linalg.norm(np.array(gripper_state[0]) - np.array(obj_pos))
+    current_dropoff = getattr(env, 'current_dropoff', env.env_cfg['dropoff_position'])
+    prev_dist_dropoff = np.linalg.norm(np.array(obj_pos[:2]) - np.array(current_dropoff[:2]))
 
     ep_phases = set()
 
@@ -342,8 +361,8 @@ def train_cloud_ppo(config_path="configs/config_cloud.yaml"):
             next_state = get_robot_state(env)
 
             # Compute shaped reward
-            reward, prev_dist_shelf, prev_dist_obj = compute_shaped_reward(
-                env, prev_dist_shelf, prev_dist_obj
+            reward, prev_dist_shelf, prev_dist_obj, prev_dist_dropoff = compute_shaped_reward(
+                env, prev_dist_shelf, prev_dist_obj, prev_dist_dropoff
             )
 
             # Track phases
@@ -394,6 +413,10 @@ def train_cloud_ppo(config_path="configs/config_cloud.yaml"):
                 )
                 prev_dist_obj = np.linalg.norm(
                     np.array(gripper_state[0]) - np.array(obj_pos)
+                )
+                current_dropoff = getattr(env, 'current_dropoff', env.env_cfg['dropoff_position'])
+                prev_dist_dropoff = np.linalg.norm(
+                    np.array(obj_pos[:2]) - np.array(current_dropoff[:2])
                 )
 
                 pbar.update(1)
