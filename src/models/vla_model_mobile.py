@@ -47,7 +47,7 @@ class RobotStateEncoder(nn.Module):
     Takes base position (x,y,yaw) + arm joints (6) = 9 numbers
     and projects to a feature vector the fusion can use.
     """
-    def __init__(self, state_dim=9, output_dim=64):
+    def __init__(self, state_dim=10, output_dim=64):
         super().__init__()
         self.network = nn.Sequential(
             nn.Linear(state_dim, 64),
@@ -128,7 +128,7 @@ class MobileVLAModel(nn.Module):
 
         self.vision_encoder   = VisionEncoder(output_dim=mc['vision_features'])
         self.language_encoder = LanguageEncoder(output_dim=mc['language_features'])
-        self.state_encoder    = RobotStateEncoder(state_dim=9, output_dim=64)
+        self.state_encoder    = RobotStateEncoder(state_dim=10, output_dim=64)
         self.fusion = CrossAttentionFusion(
             vision_dim=mc['vision_features'],
             language_dim=mc['language_features'],
