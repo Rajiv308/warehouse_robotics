@@ -404,6 +404,11 @@ class MobileWarehouseEnvV2:
         )
         return self.get_camera_image(), self.current_instruction
 
+    def reset_state_only(self):
+        """Reset without paying the camera-render cost."""
+        self.reset()
+        return self.current_instruction
+
     def step(self, action):
         # Navigation
         # Move Husky directly via position update (avoids constraint instability)
@@ -457,6 +462,65 @@ class MobileWarehouseEnvV2:
         done   = metrics["success"] or self.step_count >= self.env_cfg['max_episode_steps']
 
         return obs, reward, done, {
+            'instruction':    self.current_instruction,
+            'phase_bonuses':  phase_bonus,
+            'reached_shelf':  self.reached_shelf,
+            'reached_object': self.reached_object,
+            'grasped':        self.grasped_object,
+            'lifted':         self.lifted_object,
+            'delivered':      self.delivered_object,
+            'attached':       metrics["attached"],
+            'dist_to_shelf':  metrics["dist_to_shelf"],
+            'dist_to_obj':    metrics["dist_to_obj"],
+            'dist_dropoff':   metrics["dist_dropoff"],
+            'obj_z':          metrics["obj_z"],
+            'success':        metrics["success"],
+        }
+
+    def step_state_only(self, action):
+        """State-only step for fast RL training without camera rendering."""
+        vx = float(action[0]) * 0.05
+        wz = float(action[2]) * 0.05
+
+        husky_pos, husky_orn = p.getBasePositionAndOrientation(self.husky_id)
+        current_yaw = p.getEulerFromQuaternion(husky_orn)[2]
+        new_yaw = current_yaw + wz
+        new_orn = p.getQuaternionFromEuler([0, 0, new_yaw])
+        new_x = husky_pos[0] + vx * np.cos(new_yaw)
+        new_y = husky_pos[1] + vx * np.sin(new_yaw)
+        new_pos = [new_x, new_y, husky_pos[2]]
+
+        p.resetBasePositionAndOrientation(self.husky_id, new_pos, new_orn)
+        p.resetBasePositionAndOrientation(
+            self.panda_id,
+            [new_x, new_y, new_pos[2] + 0.5],
+            new_orn
+        )
+
+        p.setJointMotorControlArray(
+            self.panda_id, self.arm_joints[:6],
+            p.POSITION_CONTROL,
+            targetPositions=action[3:9],
+            forces=[87] * 6
+        )
+
+        gpos = 0.04 if float(action[9]) > 0.5 else 0.0
+        for gj in self.gripper_joints:
+            p.setJointMotorControl2(
+                self.panda_id, gj,
+                p.POSITION_CONTROL, targetPosition=gpos, force=10
+            )
+
+        p.stepSimulation()
+        self.step_count += 1
+
+        reward = self.compute_reward()
+        phase_bonus = self.phase_bonuses
+        self.phase_bonuses = 0.0
+        metrics = self._update_task_status()
+        done = metrics["success"] or self.step_count >= self.env_cfg['max_episode_steps']
+
+        return reward + phase_bonus, done, {
             'instruction':    self.current_instruction,
             'phase_bonuses':  phase_bonus,
             'reached_shelf':  self.reached_shelf,

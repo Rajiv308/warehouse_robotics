@@ -84,13 +84,13 @@ def collect_expert_dataset(policy, env, num_demos=150, max_steps=180):
 
     print(f"Collecting {num_demos} expert mobile rollouts for warm start...", flush=True)
     for _ in range(num_demos):
-        env.reset()
+        env.reset_state_only()
         expert.reset(env.target_object_idx, env.object_ids, env=env)
         for _ in range(max_steps):
             states.append(get_state(env))
             action = expert.get_action(env.object_ids).astype(np.float32)
             actions.append(action)
-            _, _, done, info = env.step(action)
+            reward, done, info = env.step_state_only(action)
             if info.get("success"):
                 break
             if done:
@@ -126,7 +126,7 @@ def pretrain_actor(policy, expert_states, expert_actions, epochs=10, batch_size=
 
 
 def rollout_step(env, action_np):
-    _, reward, done, info = env.step(action_np)
+    reward, done, info = env.step_state_only(action_np)
     if info.get("success"):
         reward += 150.0
     return reward, done, info
@@ -143,7 +143,7 @@ def evaluate_policy(policy, env, episodes=20):
 
     with torch.no_grad():
         for _ in range(episodes):
-            env.reset()
+            env.reset_state_only()
             state = get_state(env)
             ep_reward = 0.0
             max_z = 0.0
@@ -232,7 +232,7 @@ if __name__ == "__main__":
         else:
             env.curriculum_stage = 3
 
-        env.reset()
+        env.reset_state_only()
         state = get_state(env)
         states_b, actions_b, lps_b, rewards_b, values_b = [], [], [], [], []
         ep_reward = 0.0
