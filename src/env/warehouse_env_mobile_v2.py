@@ -255,9 +255,9 @@ class MobileWarehouseEnvV2:
 
         if self.grasp_constraint is None:
             should_attach = (
-                metrics["dist_to_obj"] < 0.10 and
+                metrics["dist_to_obj"] < 0.13 and
                 metrics["gripper_closed"] and
-                metrics["obj_z"] < 0.72 and
+                metrics["obj_z"] < 0.70 and
                 metrics["obj_speed"] < 1.5
             )
             if should_attach:
@@ -284,9 +284,9 @@ class MobileWarehouseEnvV2:
         if not self.grasped_object and metrics["attached"]:
             self.grasped_object = True
             self.phase_bonuses += 8.0
-        if not self.lifted_object and metrics["attached"] and metrics["obj_z"] > 0.72:
+        if not self.lifted_object and metrics["attached"] and metrics["obj_z"] > 0.66:
             self.lifted_object = True
-            self.phase_bonuses += 20.0
+            self.phase_bonuses += 25.0
         if not self.delivered_object and metrics["attached"] and metrics["dist_dropoff"] < 0.5:
             self.delivered_object = True
             self.phase_bonuses += 30.0
@@ -300,22 +300,30 @@ class MobileWarehouseEnvV2:
         target_shelf    = shelf_positions[self.target_object_idx // 2]
 
         if self.curriculum_stage == 0:
-            # 0.4m from shelf - very close
-            angle = np.random.uniform(-0.3, 0.3)  # narrow angle toward center
+            # Start very close to the target object, facing it.
+            target_x = target_shelf[0] + (-0.2 if self.target_object_idx % 2 == 0 else 0.2)
+            target_y = target_shelf[1]
+            direction = np.array([-target_x, -target_y])
+            direction = direction / (np.linalg.norm(direction) + 1e-8)
+            return [target_x + direction[0]*0.55,
+                    target_y + direction[1]*0.55, 0.15]
+        elif self.curriculum_stage == 1:
+            # 1.0m from shelf
+            angle = np.random.uniform(-0.6, 0.6)
             direction = np.array([-target_shelf[0], -target_shelf[1]])
             direction = direction / (np.linalg.norm(direction) + 1e-8)
-            return [target_shelf[0] + direction[0]*0.4,
-                    target_shelf[1] + direction[1]*0.4, 0.15]
-        elif self.curriculum_stage == 1:
+            rot = np.array([
+                [np.cos(angle), -np.sin(angle)],
+                [np.sin(angle),  np.cos(angle)]
+            ])
+            direction = rot @ direction
+            return [target_shelf[0] + direction[0]*1.0,
+                    target_shelf[1] + direction[1]*1.0, 0.15]
+        elif self.curriculum_stage == 2:
             # 2m from shelf
             angle = np.random.uniform(0, 2*np.pi)
             return [target_shelf[0] + 2*np.cos(angle),
                     target_shelf[1] + 2*np.sin(angle), 0.15]
-        elif self.curriculum_stage == 2:
-            # 3m from shelf
-            angle = np.random.uniform(0, 2*np.pi)
-            return [target_shelf[0] + 3*np.cos(angle),
-                    target_shelf[1] + 3*np.sin(angle), 0.15]
         else:
             # Full random within workspace
             ws = self.env_cfg['workspace_size'] - 0.5
@@ -377,7 +385,12 @@ class MobileWarehouseEnvV2:
              self.current_shelf_positions[1][1], 0.58],
         ]
         for i, obj_id in enumerate(self.object_ids):
-            noise = np.random.uniform(-0.05, 0.05, 2)
+            if self.curriculum_stage == 0:
+                noise = np.zeros(2)
+            elif self.curriculum_stage == 1:
+                noise = np.random.uniform(-0.015, 0.015, 2)
+            else:
+                noise = np.random.uniform(-0.05, 0.05, 2)
             pos   = [base_positions[i][0]+noise[0],
                      base_positions[i][1]+noise[1],
                      base_positions[i][2]]

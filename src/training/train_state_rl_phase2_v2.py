@@ -34,7 +34,7 @@ class MobileStatePolicy(nn.Module):
             nn.Linear(512, 256), nn.ReLU(),
             nn.Linear(256, action_dim)
         )
-        self.actor_log_std = nn.Parameter(torch.zeros(action_dim) - 2.4)
+        self.actor_log_std = nn.Parameter(torch.zeros(action_dim) - 2.8)
         self.critic = nn.Sequential(
             nn.Linear(state_dim, 512), nn.ReLU(),
             nn.Linear(512, 256), nn.ReLU(),
@@ -43,7 +43,7 @@ class MobileStatePolicy(nn.Module):
 
     def forward(self, state, action=None):
         mean = self.actor_mean(state)
-        std = self.actor_log_std.exp().clamp(min=0.01, max=0.06)
+        std = self.actor_log_std.exp().clamp(min=0.008, max=0.035)
         dist = torch.distributions.Normal(mean, std)
         if action is None:
             action = dist.sample()
@@ -147,6 +147,8 @@ def evaluate_policy(policy, env, episodes=20):
             state = get_state(env)
             ep_reward = 0.0
             max_z = 0.0
+            ep_shelf = False
+            ep_grasp = False
 
             for _ in range(env.env_cfg["max_episode_steps"]):
                 st = torch.FloatTensor(state).unsqueeze(0).to(device)
@@ -155,10 +157,8 @@ def evaluate_policy(policy, env, episodes=20):
                 ep_reward += reward
                 max_z = max(max_z, info.get("obj_z", 0.0))
                 state = get_state(env)
-                if info.get("reached_shelf"):
-                    shelf = shelf + 1
-                if info.get("grasped"):
-                    grasp = grasp + 1
+                ep_shelf = ep_shelf or bool(info.get("reached_shelf"))
+                ep_grasp = ep_grasp or bool(info.get("grasped"))
                 if done:
                     if info.get("success"):
                         success += 1
@@ -166,6 +166,10 @@ def evaluate_policy(policy, env, episodes=20):
 
             rewards.append(ep_reward)
             max_zs.append(max_z)
+            if ep_shelf:
+                shelf += 1
+            if ep_grasp:
+                grasp += 1
 
     return {
         "success_rate": 100.0 * success / max(episodes, 1),
@@ -178,11 +182,11 @@ def evaluate_policy(policy, env, episodes=20):
 
 if __name__ == "__main__":
     NUM_EPISODES = 30000
-    MAX_STEPS = 220
+    MAX_STEPS = 180
     EVAL_INTERVAL = 250
     EVAL_EPISODES = 20
     PPO_EPOCHS = 4
-    BC_ANCHOR = 0.05
+    BC_ANCHOR = 0.20
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Phase 2 state RL on: {device}", flush=True)
@@ -223,11 +227,11 @@ if __name__ == "__main__":
     os.makedirs("checkpoints", exist_ok=True)
 
     for episode in range(NUM_EPISODES):
-        if episode < 5000:
+        if episode < 8000:
             env.curriculum_stage = 0
-        elif episode < 12000:
+        elif episode < 16000:
             env.curriculum_stage = 1
-        elif episode < 20000:
+        elif episode < 24000:
             env.curriculum_stage = 2
         else:
             env.curriculum_stage = 3
