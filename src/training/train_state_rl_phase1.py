@@ -98,8 +98,8 @@ def pretrain_actor(policy, expert_states, expert_actions, epochs=10, batch_size=
         for start in range(0, num_samples, batch_size):
             idx = perm[start:start + batch_size]
             pred = policy.actor_mean(expert_states[idx])
-            joint_loss = nn.MSELoss()(pred[:, :6], expert_actions[idx][:, :6])
-            gripper_loss = nn.MSELoss()(pred[:, 6:], expert_actions[idx][:, 6:])
+            joint_loss = nn.MSELoss()(pred[:, :-1], expert_actions[idx][:, :-1])
+            gripper_loss = nn.MSELoss()(pred[:, -1:], expert_actions[idx][:, -1:])
             loss = joint_loss + 5.0 * gripper_loss
             optimizer.zero_grad()
             loss.backward()
@@ -192,32 +192,84 @@ def evaluate_policy(policy, env, episodes=20):
 
 
 if __name__ == "__main__":
-    NUM_EPISODES = 100000
+    polish_mode = os.environ.get("PHASE1_POLISH", "0") == "1"
+    full_arm_mode = os.environ.get("PHASE1_FULL_ARM", "0") == "1"
+    NUM_EPISODES = 20000 if polish_mode else 100000
     MAX_STEPS = 180
     EVAL_INTERVAL = 250
     EVAL_EPISODES = 20
     PPO_EPOCHS = 4
-    LR = 1e-4
-    ENT_COEF = 0.0002
-    BC_ANCHOR_COEF = 0.10
+    LR = 5e-5 if polish_mode else 1e-4
+    ENT_COEF = 0.00005 if polish_mode else 0.0002
+    BC_ANCHOR_COEF = 0.15 if polish_mode else 0.10
+    pretrain_ckpt = os.environ.get(
+        "PHASE1_INIT_CKPT",
+        (
+            "checkpoints/phase1_state_policy_eval_best.pth"
+            if polish_mode and not full_arm_mode else
+            "checkpoints/phase1_state_bc_init_fullarm.pth"
+            if full_arm_mode else
+            "checkpoints/phase1_state_bc_init.pth"
+        ),
+    )
+    train_ckpt = os.environ.get(
+        "PHASE1_TRAIN_CKPT",
+        (
+            "checkpoints/phase1_state_policy_polish.pth"
+            if polish_mode and not full_arm_mode else
+            "checkpoints/phase1_state_policy_fullarm.pth"
+            if full_arm_mode else
+            "checkpoints/phase1_state_policy.pth"
+        ),
+    )
+    eval_ckpt = os.environ.get(
+        "PHASE1_EVAL_CKPT",
+        (
+            "checkpoints/phase1_state_policy_polish_eval_best.pth"
+            if polish_mode and not full_arm_mode else
+            "checkpoints/phase1_state_policy_fullarm_eval_best.pth"
+            if full_arm_mode else
+            "checkpoints/phase1_state_policy_eval_best.pth"
+        ),
+    )
 
-    print(f"Phase 1 State RL — {NUM_EPISODES} episodes", flush=True)
+    print(
+        f"Phase 1 State RL"
+        f"{' FullArm' if full_arm_mode else ''}"
+        f"{' Polish' if polish_mode else ''} — {NUM_EPISODES} episodes",
+        flush=True
+    )
 
-    policy = StatePolicy()
+    policy = StatePolicy(action_dim=8 if full_arm_mode else 7)
     optimizer = torch.optim.Adam(policy.parameters(), lr=LR)
     print(f"Params: {sum(pp.numel() for pp in policy.parameters()):,}", flush=True)
 
     env = WarehouseEnv(render=False)
     env.initialize()
     env.env_cfg["max_episode_steps"] = MAX_STEPS
+    if polish_mode:
+        env.attach_dist_threshold = 0.06
+        env.success_lift_height = 0.12
+        env.success_hold_steps = 6
+        env.max_success_obj_speed = 1.0
+        env.post_grasp_target_height = 0.18
 
-    pretrain_ckpt = "checkpoints/phase1_state_bc_init.pth"
     if os.path.exists(pretrain_ckpt):
         policy.load_state_dict(torch.load(pretrain_ckpt, map_location="cpu", weights_only=True))
         print(f"Loaded warm-start state policy from {pretrain_ckpt}", flush=True)
-        expert_states, expert_actions = collect_expert_dataset(policy, env, num_demos=120, steps_per_demo=110)
+        expert_states, expert_actions = collect_expert_dataset(
+            policy,
+            env,
+            num_demos=80 if polish_mode else (120 if not full_arm_mode else 160),
+            steps_per_demo=120 if polish_mode else 110,
+        )
     else:
-        expert_states, expert_actions = collect_expert_dataset(policy, env, num_demos=200, steps_per_demo=110)
+        expert_states, expert_actions = collect_expert_dataset(
+            policy,
+            env,
+            num_demos=220 if full_arm_mode else 200,
+            steps_per_demo=120 if full_arm_mode else 110,
+        )
         pretrain_actor(policy, expert_states, expert_actions, epochs=12)
         torch.save(policy.state_dict(), pretrain_ckpt)
         print(f"Saved warm-start state policy to {pretrain_ckpt}", flush=True)
@@ -290,8 +342,8 @@ if __name__ == "__main__":
 
             bc_idx = torch.randint(0, expert_states.shape[0], (128,))
             bc_pred = policy.actor_mean(expert_states[bc_idx])
-            bc_joint = nn.MSELoss()(bc_pred[:, :6], expert_actions[bc_idx][:, :6])
-            bc_gripper = nn.MSELoss()(bc_pred[:, 6:], expert_actions[bc_idx][:, 6:])
+            bc_joint = nn.MSELoss()(bc_pred[:, :-1], expert_actions[bc_idx][:, :-1])
+            bc_gripper = nn.MSELoss()(bc_pred[:, -1:], expert_actions[bc_idx][:, -1:])
             bc_loss = bc_joint + 5.0 * bc_gripper
 
             loss = pg_loss + 0.5 * value_loss - ENT_COEF * ent.mean() + BC_ANCHOR_COEF * bc_loss
@@ -303,7 +355,7 @@ if __name__ == "__main__":
         train_success = 100.0 * np.mean(successes) if successes else 0.0
         if train_success > best_train_success:
             best_train_success = train_success
-            torch.save(policy.state_dict(), "checkpoints/phase1_state_policy.pth")
+            torch.save(policy.state_dict(), train_ckpt)
 
         if episode > 0 and episode % EVAL_INTERVAL == 0:
             eval_metrics = evaluate_policy(policy, env, episodes=EVAL_EPISODES)
@@ -324,7 +376,7 @@ if __name__ == "__main__":
             if better:
                 best_eval_success = eval_success
                 best_eval_reward = eval_reward
-                torch.save(policy.state_dict(), "checkpoints/phase1_state_policy_eval_best.pth")
+                torch.save(policy.state_dict(), eval_ckpt)
                 print(
                     f"  ✓ Saved eval-best checkpoint "
                     f"(success={best_eval_success:.1f}%, reward={best_eval_reward:.1f})",
