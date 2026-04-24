@@ -318,7 +318,8 @@ class WarehouseEnv:
         Reset a simplified pick task for Cartesian training.
         - one target color/instruction
         - optionally hides distractors away from workspace
-        - keeps object positions tight and learnable
+        - all three boxes always get distinct, well-separated slots so they
+          never overlap regardless of which colour is the target
         """
         self.step_count = 0
         self._release_grasp_constraint()
@@ -338,18 +339,25 @@ class WarehouseEnv:
         color_names = ["red", "blue", "green"]
         self.current_instruction = f"pick up the {color_names[self._target_idx]} box"
 
-        target_base = np.array([0.50, 0.0, 0.05], dtype=np.float32)
-        noise = np.random.uniform(-position_noise, position_noise, 2)
-        target_pos = target_base.copy()
-        target_pos[:2] += noise
+        # Three fixed lateral slots, all within arm reach.
+        # Shuffle so the target is not always in the same spot.
+        BASE_SLOTS = [
+            np.array([0.48, -0.20, 0.05], dtype=np.float32),
+            np.array([0.52,  0.00, 0.05], dtype=np.float32),
+            np.array([0.48,  0.20, 0.05], dtype=np.float32),
+        ]
+        slot_order = np.random.permutation(3)  # which slot each object gets
+        # Guarantee the target lands in one of the reachable slots (all are,
+        # but this makes the assignment explicit and verifiable).
 
         for i, obj_id in enumerate(self.object_ids):
-            if i == self._target_idx:
-                pos = target_pos.tolist()
-            elif distractors:
-                offset_y = 0.22 if i == 1 else -0.22
-                pos = [0.50, offset_y, 0.05]
+            if distractors or i == self._target_idx:
+                slot = BASE_SLOTS[slot_order[i]].copy()
+                noise = np.random.uniform(-position_noise, position_noise, 2)
+                slot[:2] += noise
+                pos = slot.tolist()
             else:
+                # Hide unused objects far outside workspace
                 pos = [1.8 + 0.2 * i, 1.8 + 0.2 * i, 0.05]
             p.resetBasePositionAndOrientation(obj_id, pos, [0, 0, 0, 1])
             p.resetBaseVelocity(obj_id, [0, 0, 0], [0, 0, 0])
