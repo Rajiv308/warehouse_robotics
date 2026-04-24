@@ -1,6 +1,7 @@
 /data/
 logs/
 venv/
+.venv*/
 __pycache__/
 *.pyc
 *.pkl
@@ -8,3 +9,10 @@ __pycache__/
 .DS_Store
 checkpoints/
 *.zip
+
+# Throwaway patch scripts and editor backup files from this project's history
+*.bak_*
+apply_phase2_delivery_fix.py
+final_patch_exact.py
+quick_patch_phase2_v*.py
+src/training/train_rl_cloud_backup.py

@@ -139,6 +139,7 @@ def evaluate_policy(policy, env, episodes=20):
     success = 0
     grasp = 0
     shelf = 0
+    lift = 0
     max_zs = []
 
     with torch.no_grad():
@@ -149,6 +150,7 @@ def evaluate_policy(policy, env, episodes=20):
             max_z = 0.0
             ep_shelf = False
             ep_grasp = False
+            ep_lift = False
 
             for _ in range(env.env_cfg["max_episode_steps"]):
                 st = torch.FloatTensor(state).unsqueeze(0).to(device)
@@ -159,6 +161,7 @@ def evaluate_policy(policy, env, episodes=20):
                 state = get_state(env)
                 ep_shelf = ep_shelf or bool(info.get("reached_shelf"))
                 ep_grasp = ep_grasp or bool(info.get("grasped"))
+                ep_lift = ep_lift or bool(info.get("lifted"))
                 if done:
                     if info.get("success"):
                         success += 1
@@ -170,31 +173,53 @@ def evaluate_policy(policy, env, episodes=20):
                 shelf += 1
             if ep_grasp:
                 grasp += 1
+            if ep_lift:
+                lift += 1
 
     return {
         "success_rate": 100.0 * success / max(episodes, 1),
         "grasp_rate": 100.0 * grasp / max(episodes, 1),
         "shelf_rate": 100.0 * shelf / max(episodes, 1),
+        "lift_rate": 100.0 * lift / max(episodes, 1),
         "mean_reward": float(np.mean(rewards)) if rewards else 0.0,
         "mean_max_z": float(np.mean(max_zs)) if max_zs else 0.0,
     }
 
 
 if __name__ == "__main__":
-    NUM_EPISODES = 30000
-    MAX_STEPS = 180
-    EVAL_INTERVAL = 250
-    EVAL_EPISODES = 20
+    NUM_EPISODES = int(os.environ.get("PHASE2_NUM_EPISODES", "30000"))
+    MAX_STEPS = int(os.environ.get("PHASE2_MAX_STEPS", "180"))
+    EVAL_INTERVAL = int(os.environ.get("PHASE2_EVAL_INTERVAL", "250"))
+    EVAL_EPISODES = int(os.environ.get("PHASE2_EVAL_EPISODES", "20"))
     PPO_EPOCHS = 4
     BC_ANCHOR = 0.20
+    fixed_stage = os.environ.get("PHASE2_FIXED_STAGE")
+    fixed_stage = int(fixed_stage) if fixed_stage is not None else None
+    warm_demos = int(os.environ.get("PHASE2_WARM_DEMOS", "100"))
+    resume_ckpt = os.environ.get("PHASE2_RESUME_CKPT")
+    best_ckpt = os.environ.get(
+        "PHASE2_BEST_CKPT",
+        (
+            f"checkpoints/phase2_state_policy_stage{fixed_stage}_best.pth"
+            if fixed_stage is not None else
+            "checkpoints/phase2_state_policy_v2_best.pth"
+        ),
+    )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Phase 2 state RL on: {device}", flush=True)
+    print(
+        f"Config | episodes={NUM_EPISODES} max_steps={MAX_STEPS} "
+        f"eval_interval={EVAL_INTERVAL} eval_episodes={EVAL_EPISODES} "
+        f"fixed_stage={fixed_stage} success_mode=pickup",
+        flush=True,
+    )
 
     env = MobileWarehouseEnvV2(
         config_path="configs/config_cloud.yaml",
         render=False,
         curriculum_stage=0,
+        success_mode="pickup",
     )
     env.initialize()
     env.env_cfg["max_episode_steps"] = MAX_STEPS
@@ -203,16 +228,21 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(policy.parameters(), lr=1e-4)
     print(f"Params: {sum(pp.numel() for pp in policy.parameters()):,}", flush=True)
 
-    warm_ckpt = "checkpoints/phase2_state_bc_init_v2.pth"
-    if os.path.exists(warm_ckpt):
-        policy.load_state_dict(torch.load(warm_ckpt, map_location=device, weights_only=True))
-        print(f"Loaded warm-start state policy from {warm_ckpt}", flush=True)
-        expert_states, expert_actions = collect_expert_dataset(policy, env, num_demos=100, max_steps=160)
+    if resume_ckpt and os.path.exists(resume_ckpt):
+        policy.load_state_dict(torch.load(resume_ckpt, map_location=device, weights_only=True))
+        print(f"Loaded resume checkpoint from {resume_ckpt}", flush=True)
+        expert_states, expert_actions = collect_expert_dataset(policy, env, num_demos=warm_demos, max_steps=160)
     else:
-        expert_states, expert_actions = collect_expert_dataset(policy, env, num_demos=180, max_steps=160)
-        pretrain_actor(policy, expert_states.to(device), expert_actions.to(device), epochs=10)
-        torch.save(policy.state_dict(), warm_ckpt)
-        print(f"Saved warm-start state policy to {warm_ckpt}", flush=True)
+        warm_ckpt = "checkpoints/phase2_state_bc_init_v2.pth"
+        if os.path.exists(warm_ckpt):
+            policy.load_state_dict(torch.load(warm_ckpt, map_location=device, weights_only=True))
+            print(f"Loaded warm-start state policy from {warm_ckpt}", flush=True)
+            expert_states, expert_actions = collect_expert_dataset(policy, env, num_demos=warm_demos, max_steps=160)
+        else:
+            expert_states, expert_actions = collect_expert_dataset(policy, env, num_demos=180, max_steps=160)
+            pretrain_actor(policy, expert_states.to(device), expert_actions.to(device), epochs=10)
+            torch.save(policy.state_dict(), warm_ckpt)
+            print(f"Saved warm-start state policy to {warm_ckpt}", flush=True)
 
     expert_states = expert_states.to(device)
     expert_actions = expert_actions.to(device)
@@ -227,7 +257,9 @@ if __name__ == "__main__":
     os.makedirs("checkpoints", exist_ok=True)
 
     for episode in range(NUM_EPISODES):
-        if episode < 8000:
+        if fixed_stage is not None:
+            env.curriculum_stage = fixed_stage
+        elif episode < 8000:
             env.curriculum_stage = 0
         elif episode < 16000:
             env.curriculum_stage = 1
@@ -310,6 +342,7 @@ if __name__ == "__main__":
                 f"[Eval @ {episode:6d}] "
                 f"Success={eval_metrics['success_rate']:5.1f}% | "
                 f"Grasp={eval_metrics['grasp_rate']:5.1f}% | "
+                f"Lift={eval_metrics['lift_rate']:5.1f}% | "
                 f"Shelf={eval_metrics['shelf_rate']:5.1f}% | "
                 f"Reward={eval_metrics['mean_reward']:7.1f} | "
                 f"MeanMaxZ={eval_metrics['mean_max_z']:.3f}",
@@ -323,9 +356,10 @@ if __name__ == "__main__":
             if better:
                 best_eval_success = eval_metrics["success_rate"]
                 best_eval_reward = eval_metrics["mean_reward"]
-                torch.save(policy.state_dict(), "checkpoints/phase2_state_policy_v2_best.pth")
+                torch.save(policy.state_dict(), best_ckpt)
                 print(
                     f"  ✓ Saved eval-best checkpoint "
+                    f"to {best_ckpt} "
                     f"(success={best_eval_success:.1f}%, reward={best_eval_reward:.1f})",
                     flush=True
                 )

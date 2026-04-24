@@ -48,37 +48,37 @@ class IKExpertController:
         tx, ty, tz = self.target_pos
 
         if self.phase == 0:
-            # Hover 0.3m above object
-            above_pos = [tx, ty, tz + 0.3]
+            # Hover above object with fingers aligned before descending.
+            above_pos = [tx, ty, tz + 0.18]
             joints = self.compute_ik(above_pos)
-            action = np.append(joints[:6], 1.0)  # open gripper
-            if self.phase_steps >= 40:
+            action = np.append(joints[:7], 1.0)  # open gripper
+            if self.phase_steps >= 50:
                 self.phase = 1
                 self.phase_steps = 0
 
         elif self.phase == 1:
-            # Move to object height
-            reach_pos = [tx, ty, tz + 0.05]
+            # Lower close enough that both fingers can actually contact the box.
+            reach_pos = [tx, ty, tz - 0.002]
             joints = self.compute_ik(reach_pos)
-            action = np.append(joints[:6], 1.0)  # open gripper
-            if self.phase_steps >= 40:
+            action = np.append(joints[:7], 1.0)  # open gripper
+            if self.phase_steps >= 55:
                 self.phase = 2
                 self.phase_steps = 0
 
         elif self.phase == 2:
-            # Close gripper
-            reach_pos = [tx, ty, tz + 0.05]
+            # Close gripper while holding the centered grasp pose.
+            reach_pos = [tx, ty, tz - 0.002]
             joints = self.compute_ik(reach_pos)
-            action = np.append(joints[:6], 0.0)  # close gripper
-            if self.phase_steps >= 30:
+            action = np.append(joints[:7], 0.0)  # close gripper
+            if self.phase_steps >= 45:
                 self.phase = 3
                 self.phase_steps = 0
 
         elif self.phase == 3:
-            # Lift up
-            lift_pos = [tx, ty, tz + 0.4]
+            # Lift straight up after the grasp has settled.
+            lift_pos = [tx, ty, tz + 0.18]
             joints = self.compute_ik(lift_pos)
-            action = np.append(joints[:6], 0.0)  # keep closed
+            action = np.append(joints[:7], 0.0)  # keep closed
             # Stay in phase 3
 
         self.phase_steps += 1
