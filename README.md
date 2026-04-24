@@ -41,7 +41,7 @@ python src/eval/replay_ppo_experiment.py
 PHASE2_USE_NAV_BROAD=1 PHASE2_DELIVERY_USE_BC=1 python src/eval/demo_phase2_hybrid.py
 
 # Use the PPO-finetuned nav checkpoint (functionally identical to BC since
-# PPO destabilized — see EXPERIMENTS.md §2.8):
+# PPO destabilized; see "Negative results" below):
 PHASE2_USE_NAV_RL=1 python src/eval/demo_phase2_hybrid.py
 
 # Standalone headless eval of the BC delivery policy:
@@ -72,7 +72,7 @@ Two load-bearing neural networks (BC nav + BC pickup), one classical planner (A\
 - **A\* path planning** replaced a behavior-cloned delivery policy because the BC expert was geometry-agnostic (straight-line driver), so the BC inherited no obstacle awareness. A\* has it natively.
 - **Contact-gated weld** (`env.auto_weld = False` + `getContactPoints` check on both finger links) forces the pickup policy to produce *real* two-finger grasps, not just proximity triggers.
 
-See `EXPERIMENTS.md` for the full record of what was tried (VLA, joint-space PPO, Cartesian BC, BC+PPO, etc.) and what worked vs didn't.
+Approaches we tried (VLA, joint-space PPO, Cartesian BC, BC+PPO) and what survived into the final pipeline are summarized in the "Negative results" section below.
 
 ---
 
@@ -81,12 +81,7 @@ See `EXPERIMENTS.md` for the full record of what was tried (VLA, joint-space PPO
 ```
 .
 ├── README.md                         (this file)
-├── EXPERIMENTS.md                    full experimental record / ablation
-├── FINAL_PROJECT_SCOPE.md            locked scope and claims
-├── FINAL_REPORT_DRAFT.md             skeleton for the final report
-├── PRESENTATION_OUTLINE.md           slide-by-slide outline
-├── PROJECT_STATUS_HANDOFF.md         engineering snapshot
-├── OVERNIGHT_HANDOFF.md              session handoff notes
+├── requirements.txt                  pip deps
 ├── configs/config_cloud.yaml         env config (shelves, dropoff, workspace)
 ├── demos/                            BC training datasets (.npz)
 │   ├── nav_bc.npz
@@ -139,7 +134,8 @@ PHASE2_BC_EPOCHS=150           python src/training/train_bc_pickup.py
 PHASE2_DELIVERY_BC_NUM_EPISODES=400 python src/data/collect_delivery_bc_demos.py
 PHASE2_DELIVERY_BC_EPOCHS=80        python src/training/train_bc_delivery.py
 
-# BC+PPO fine-tune ablation (expect destabilization; see EXPERIMENTS.md §2.8)
+# BC+PPO fine-tune ablation (expect destabilization over a saturated
+# BC baseline — see "Negative results" below)
 PHASE2_NAV_PPO_ITERS=150       python src/training/train_nav_ppo.py
 ```
 
@@ -170,7 +166,7 @@ Recommended to also retain:
 - Pickup: **5/5 (100%)** with real two-finger contact
 - Three colored boxes visible, target selected by instruction parse + vision confirm
 
-### Negative results (documented, see `EXPERIMENTS.md`)
+### Negative results (documented)
 - End-to-end VLA (ResNet-18 + DistilBERT fusion): did not converge
 - Joint-space PPO for Phase 1: "drugged-hand" behavior, no reliable grasp
 - BC+PPO pickup on Phase 2: reward-hacked the simulator's proximity weld
