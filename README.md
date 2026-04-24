@@ -143,14 +143,20 @@ PHASE2_NAV_PPO_ITERS=150       python src/training/train_nav_ppo.py
 
 ## Checkpoints
 
-Not stored in git (2.2 GB). For the final demo you need at minimum:
-- `checkpoints/phase2_nav_bc_best.pth`
-- `checkpoints/phase2_pick_bc_best.pth`
+Small checkpoints needed for the demo and all BC/RL/Cartesian ablation experiments are committed to the repo in `checkpoints/` (18 MB total). The demo runs out of the box once you `pip install -r requirements.txt`.
 
-Recommended to also retain:
-- `checkpoints/phase2_delivery_bc_best.pth` (ablation)
-- `checkpoints/phase2_nav_ppo_best.pth` (ablation — retains BC warm-start weights)
-- `checkpoints/phase2_nav_pickpose_best.pth` (original narrow-start BC, safe fallback)
+Key checkpoints used in the final demo:
+- `checkpoints/phase2_nav_bc_best.pth` — learned nav (broad-spawn BC)
+- `checkpoints/phase2_pick_bc_best.pth` — learned pickup (contact-verified BC)
+
+Ablation artifacts also included:
+- `checkpoints/phase2_delivery_bc_best.pth` — delivery BC (60% eval; A\* used instead in the demo)
+- `checkpoints/phase2_nav_ppo_best.pth` — BC+PPO nav fine-tune (destabilized; contains BC warm-start weights)
+- `checkpoints/phase2_pick_cartesian_best.pth`, `_robust_best.pth` — earlier PPO+BC pickup
+- `checkpoints/phase2_nav_pickpose_best.pth`, `_stage1_best.pth` — narrower-spawn BC nav baselines
+- `checkpoints/phase1_*` — the full Phase 1 experiment trail (joint-space RL, Cartesian BC, stage-align)
+
+Six large abandoned VLA / end-to-end RL checkpoints (300-550 MB each, 2.2 GB total) are deliberately excluded via `.gitignore` because they are not used in the final pipeline and would bloat the repo.
 
 ---
 

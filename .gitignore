@@ -5,10 +5,18 @@ venv/
 __pycache__/
 *.pyc
 *.pkl
-*.pth
 .DS_Store
-checkpoints/
 *.zip
+
+# Large abandoned VLA / end-to-end RL checkpoints (300-550 MB each, over
+# GitHub's recommended file size). The small BC and RL checkpoints are
+# committed so the demo runs out of the box.
+checkpoints/best_model.pth
+checkpoints/best_mobile_model.pth
+checkpoints/best_rl_model.pth
+checkpoints/best_mobile_rl_model.pth
+checkpoints/best_cloud_rl_model.pth
+checkpoints/checkpoint_epoch_*.pth
 
 # Throwaway patch scripts and editor backup files from this project's history
 *.bak_*
